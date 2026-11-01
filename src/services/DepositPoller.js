@@ -100,16 +100,74 @@ async function processPending(bot) {
   return out;
 }
 
+/**
+ * Verify + credit a Binance Pay number immediately (wallet-menu top-up).
+ * If it is not settled yet it is queued — exactly like the checkout path —
+ * and the 3-min cycle will finish it. `expected` 0 means "credit whatever".
+ */
+async function topupNow(bot, userId, txid, expected = 0) {
+  const id = String(txid || '').trim();
+  if (!id) return { ok: false, reason: 'empty' };
+  const dupeTx = db.prepare('SELECT 1 FROM transactions WHERE txid = ?').get(id);
+  if (dupeTx) return { ok: false, reason: 'used' };
+  let info = null;
+  try { info = await checkTransaction(id); } catch (e) { /* queued below */ }
+  if (info && info.status === 'SUCCESS' && (info.amount || 0) > 0) {
+    const paid = round2(info.amount);
+    const user = db.prepare('SELECT balance FROM users WHERE id = ?').get(userId);
+    if (!user) return { ok: false, reason: 'no_user' };
+    const nextBal = round2((user.balance || 0) + paid);
+    const { getUsdTryRate } = require('../utils/currency');
+    const tryRate = await getUsdTryRate().catch(() => 47.22);
+    db.transaction(() => {
+      db.prepare('UPDATE users SET balance = ? WHERE id = ?').run(nextBal, userId);
+      db.prepare('INSERT INTO transactions (txid, user_id, product_id, amount, status, amount_try) VALUES (?,?,?,?,?,?)')
+        .run(id, userId, null, paid, 'SUCCESS', paid * tryRate);
+    })();
+    await notify(bot, userId, t(getUserLang(userId), 'topup_credited', { amount: paid, balance: nextBal }));
+    return { ok: true, credited: paid, balance: nextBal };
+  }
+  db.prepare(`INSERT OR IGNORE INTO pending_topups (user_id, txid, expected_amount, product_id, qty, source, note)
+              VALUES (?, ?, 0, NULL, NULL, 'binance_topup', 'wallet menu queue')`).run(userId, id);
+  return { ok: true, queued: true };
+}
+
 let timer = null;
+let cycles = 0;
+
+/**
+ * Provider wallet sweep (NOWPayments invoices — the CP rail is IPN-only):
+ * settled invoices credit through the same idempotent DepositProviders path
+ * and the one-shot invoice is marked DONE (next request mints a new one).
+ */
+async function sweepProviderWallets(bot) {
+  const DepSvc = require('./DepositProviders');
+  if (DepSvc.provider !== 'nowpayments') return;
+  const rows = db.prepare("SELECT * FROM deposit_wallets WHERE provider='nowpayments' AND status='ACTIVE'").all();
+  for (const w of rows) {
+    let st = null;
+    try { st = await DepSvc.npCheckWallet(w); } catch (e) { continue; }
+    if (!st || st.status !== 'settled') continue;
+    const r = await DepSvc.creditDeposit({
+      provider: 'nowpayments', ref: String(w.provider_ref), userId: w.user_id,
+      usd: Number(st.usd || 0), network: w.network, payload: st.raw, bot
+    });
+    if (r.ok || r.reason === 'dup') {
+      db.prepare("UPDATE deposit_wallets SET status='DONE', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(w.id);
+    }
+  }
+}
 
 function start(bot, everyMs = 3 * 60 * 1000) {
   if (timer) return;
   const tick = async () => {
     try {
       const pending = db.prepare("SELECT COUNT(*) c FROM pending_topups WHERE status='PENDING'").get().c;
-      if (!pending) return;
-      const r = await processPending(bot);
-      if (r.credited || r.expired) console.log(`[DepositPoller] credited=${r.credited} expired=${r.expired} waiting=${r.waiting}`);
+      if (pending) {
+        const r = await processPending(bot);
+        if (r.credited || r.expired) console.log(`[DepositPoller] credited=${r.credited} expired=${r.expired} waiting=${r.waiting}`);
+      }
+      if (++cycles % 5 === 0) await sweepProviderWallets(bot); // ~15 min
     } catch (e) {
       console.error('[DepositPoller]', e.message);
     }
@@ -121,4 +179,4 @@ function start(bot, everyMs = 3 * 60 * 1000) {
   console.log('[DepositPoller] started (3-min cycle for pending Binance top-ups)');
 }
 
-module.exports = { start, processPending };
+module.exports = { start, processPending, topupNow };

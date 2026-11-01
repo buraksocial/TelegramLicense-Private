@@ -29,11 +29,13 @@ const { classifyWarranty, warrantyAllows, effectiveWarranty } = require('../src/
   CatalogStore.getBalance = async () => 100;
   CatalogStore.getCatalog = async (supplier) => CatalogStore.readSnapshot(supplier.id); // offline: serve DB snapshot
 
-  // temp links on product 2: two guaranteed + one unknown-class service
-  const links = [
-    [2, 1, 'Paglu_12', 1],                  // 'Gemini Pro 18M 2 Hour Warranty' guaranteed
-    [2, 5, 'service_gemini_reactivate', 2]  // 'Gemini Pro 18M (5-Hour Warranty ⚡)' guaranteed
-  ];
+  // temp links on product 2: two in-stock guaranteed services picked from the
+  // REAL snapshot (stock/prices drift live — never hardcode row identities)
+  const gRows = db.prepare(`SELECT supplier_id, remote_service_id FROM supplier_catalogs
+    WHERE warranty='guaranteed' AND stock > 0 AND price_usd IS NOT NULL AND price_usd <= 50
+    ORDER BY price_usd LIMIT 2`).all();
+  assert(gRows.length > 0, 'need at least one in-stock guaranteed snapshot row');
+  const links = gRows.map((r, i) => [2, r.supplier_id, r.remote_service_id, i + 1]);
   for (const [, supId, rid] of links) {
     const row = db.prepare('SELECT name, warranty FROM supplier_catalogs WHERE supplier_id=? AND remote_service_id=?').get(supId, rid);
     if (!row) throw new Error('snapshot missing ' + rid);

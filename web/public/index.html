@@ -50,6 +50,7 @@ a{color:var(--acc)}
   <div class="sp"></div>
   <div class="balance" id="balChip" style="display:none"></div>
   <button class="ghost" id="btnLang" style="padding:6px 10px;font-size:13px">EN/TR</button>
+  <button class="ghost" id="btnDep" style="display:none;padding:6px 10px;font-size:13px">🌐 Yatır</button>
   <button class="ghost" id="btnOrders" style="padding:6px 10px;font-size:13px" data-i="nav_orders">Siparişlerim</button>
   <a href="/admin.html" id="btnAdmin" style="display:none"><button class="ghost" style="padding:6px 10px;font-size:13px">⚙️ Admin</button></a>
   <button class="ghost" id="btnOut" style="padding:6px 10px;font-size:13px;display:none" data-i="nav_logout">Çıkış</button>
@@ -73,7 +74,7 @@ const I18N={
   caride_note:'Hesabın caride (negatif bakiye). Bakiye ile ödeme için önce yükleme yap.',
   buy_t:'Satın al',svc:'Hizmetler',best:'⭐ en iyi',stock:'stok',ok:'Sipariş tamam!',
   copied:'kopyalandı',insufficient:'bakiye yetersiz',lock_expired:'Fiyat süresi doldu, tekrar dene',
-  queued_t:'🕐 Ödemen bekliyor',dep_t:'Bakiyene yüklendi'},
+  queued_t:'🕐 Ödemen bekliyor',credited_t:'Bakiyene yüklendi',dep_t:'Kripto yatırma',dep_get:'Adresimi oluştur',dep_note:'Adres yalnızca sana özel — ödeme ağda doğrulanınca tutar otomatik bakiyene yazılır.'},
  en:{app_name:'Store',nav_orders:'My Orders',nav_logout:'Logout',login_h:'Sign in',
   login_p:'Sign in with your Telegram account to continue. Balance, discounts and orders are shared with the bot.',
   login_retry:'🔄 Reload',login_id:'Telegram ID',login_btn:'Sign in',err_login:'Login failed',choose_cat:'🗂 Choose category',all:'All',
@@ -84,7 +85,7 @@ const I18N={
   caride_note:'Account is in the red (negative). Top up before paying with balance.',
   buy_t:'Purchase',svc:'Services',best:'⭐ best',stock:'stock',ok:'Order complete!',
   copied:'copied',insufficient:'insufficient balance',lock_expired:'Price expired, try again',
-  queued_t:'🕐 Payment pending',dep_t:'Credited to balance'}};
+  queued_t:'🕐 Payment pending',credited_t:'Credited to balance',dep_t:'Crypto deposit',dep_get:'Create my address',dep_note:'The address is personal to you — once the network confirms, the amount is credited to your balance automatically.'}};
 const t=k=>(I18N[state.lang]||I18N.tr)[k]||k;
 
 async function api(path,opts={}){
@@ -100,12 +101,14 @@ function money(n){return Number(n||0).toFixed(2)+'$'}
 function setBal(v){const c=$('#balChip');if(!c)return;c.textContent=t('bal')+': '+money(v);c.style.color=v<0?'#e5484d':''}
 
 async function loadShell(){
-  try{const cfg=await api('config');state.categories=cfg.categories||[];state.botUsername=cfg.bot_username||null;}catch(e){}
+  state.crypto=false;
+  try{const cfg=await api('config');state.categories=cfg.categories||[];state.botUsername=cfg.bot_username||null;state.crypto=!!cfg.crypto_deposits;}catch(e){}
   if(!state.token){renderLogin();return}
   try{state.me=await api('me');}catch(e){if(e.status===401){state.token=null;localStorage.removeItem('shop_token');renderLogin();return}}
   $('#balChip').style.display='block';setBal(state.me.balance);
   $('#btnOut').style.display='inline-block';
   if(state.me.is_admin)$('#btnAdmin').style.display='inline-block';
+  $('#btnDep').style.display=state.crypto?'inline-block':'none';
   const prods=await api('products');
   state.products=prods.products||[];
   renderCats();renderProducts();
@@ -220,7 +223,7 @@ async function openCheckout(sel){
 function closeModal(){$('#modal').classList.remove('on')}
 function renderDelivered(r){
   if(r.kind==='queued'||r.kind==='topped_up'){
-    $('#view').innerHTML=`<h2>${r.kind==='queued'?t('queued_t'):t('dep_t')}</h2><div class="order"><p style="margin:0">${esc(r.message||'')}</p></div>
+    $('#view').innerHTML=`<h2>${r.kind==='queued'?t('queued_t'):t('credited_t')}</h2><div class="order"><p style="margin:0">${esc(r.message||'')}</p></div>
     <div class="rowbtns"><button class="ghost" onclick="loadShell()">${t('back')}</button></div>`;
     return;
   }
@@ -252,6 +255,27 @@ async function renderOrders(){
   };
 }
 $('#btnOrders').onclick=renderOrders;
+$('#btnDep').onclick=renderDeposits;
+async function renderDeposits(){
+  $('#view').innerHTML='<p class="muted">…</p>';
+  let d;try{d=await api('deposits')}catch(e){toast(e.message);return loadShell()}
+  if(!d.enabled){$('#view').innerHTML=`<p class="muted">devre dışı</p>`;return}
+  const have={};(d.data||[]).forEach(w=>have[w.network]=w);
+  $('#view').innerHTML=`<h2>🌐 ${t('dep_t')}</h2>`+(d.networks||[]).map(n=>{
+    const w=have[n.key];
+    return `<div class="order"><div class="hd"><b>${n.icon} ${esc(n.label)}</b></div>`
+     +(w
+       ? `<div><code style="user-select:all">${esc(w.address||'—')}</code></div>`
+         +(w.memo?`<div class="muted">Memo / Payment ID: <code style="user-select:all">${esc(w.memo)}</code></div>`:'')
+         +(w.url?`<div class="muted"><a href="${esc(w.url)}" target="_blank" rel="noopener">🔗 ödeme sayfası</a></div>`:'')
+         +`<div class="rowbtns"><button class="ghost" onclick="depCopy('${n.key}')">${t('copied')}</button></div>`
+       : `<div class="rowbtns"><button class="ghost" onclick="depGet('${n.key}')">${t('dep_get')}</button></div>`)
+     +`</div>`;
+  }).join('')+`<p class="muted">${t('dep_note')}</p><div class="rowbtns"><button class="ghost" onclick="loadShell()">${t('back')}</button></div>`;
+  state.depCache={};(d.data||[]).forEach(w=>state.depCache[w.network]=w);
+}
+function depCopy(k){const w=state.depCache&&state.depCache[k];if(w&&w.address&&navigator.clipboard)navigator.clipboard.writeText(w.address+(w.memo?' '+w.memo:'')).then(()=>toast(t('copied')))}
+function depGet(k){api('deposits',{method:'POST',body:JSON.stringify({network:k})}).then(()=>{renderDeposits();toast('✅')}).catch(e=>toast(e.message))}
 $('#btnOut').onclick=async()=>{try{await api('logout',{method:'POST'})}catch(e){};localStorage.removeItem('shop_token');state.token=null;renderLogin()};
 $('#btnLang').onclick=()=>{state.lang=state.lang==='tr'?'en':'tr';localStorage.setItem('shop_lang',state.lang);$('#btnLang').textContent=state.lang==='tr'?'EN/TR':'TR/EN';loadShell()};
 loadShell();

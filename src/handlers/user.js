@@ -3,6 +3,8 @@ const { calculateSignature, checkTransaction } = require('../services/binance');
 const { t } = require('../utils/i18n');
 const { BINANCE_PAY_ID } = require('../config/env');
 const { sendOrderLog, sendWalletTopUpLog } = require('../utils/logger');
+const DepSvc = require('../services/DepositProviders');
+const DepositPoller = require('../services/DepositPoller');
 // Pricing/identity helpers come from CheckoutService — the SAME code the web
 // store runs, so bot and web can never quote different prices.
 const CS = require('../services/CheckoutService');
@@ -268,14 +270,52 @@ function setupUserHandlers(bot) {
       ? `\n\n⚠️ ${t(lang, 'wallet_caride') || 'Hesabınız caride (negatif). Bakiye ile sipariş vermek için bakiyenizi yüklemeniz gerekir.'}`
       : '';
 
-    ctx.editMessageText(`💼 <b>Wallet Balance:</b> ${balance}$${caride}`, {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: t(lang, 'btn_main_menu') || '🔙 Main Menu', callback_data: 'main_menu' }]
-        ]
+    const rows = [[{ text: '🟡 Binance Pay ile yükle', callback_data: 'bin_topup' }]];
+    if (DepSvc.providerConfigured()) {
+      const nets = DepSvc.enabledNetworks();
+      for (let i = 0; i < nets.length; i += 2) {
+        rows.push(nets.slice(i, i + 2).map((n) => ({ text: `${n.icon} ${n.label}`, callback_data: `depw_${n.key}` })));
       }
+    }
+    rows.push([{ text: t(lang, 'btn_main_menu') || '🔙 Main Menu', callback_data: 'main_menu' }]);
+
+    const depHint = DepSvc.providerConfigured()
+      ? `\n\n🌐 Kripto yatır: ağını seç — <b>kişiye özel adresin</b> anında oluşur, ödeme otomatik algılanır.`
+      : '';
+    ctx.editMessageText(`💼 <b>Bakiye:</b> ${balance}$${caride}${depHint}`, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: rows }
     });
+  });
+
+  bot.action('bin_topup', async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'waiting_topup_txid';
+    ctx.editMessageText(t(lang, 'bin_topup_info', { payId: BINANCE_PAY_ID }), {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: t(lang, 'btn_cancel') || '❌ Vazgeç', callback_data: 'menu_wallet' }]] }
+    });
+  });
+
+  // çok ağlı kripto yatırma — kişiye özel adres (CoinPayments/NOWPayments)
+  bot.action(/^depw_([a-z0-9_]+)$/, async (ctx) => {
+    const net = ctx.match[1];
+    await ctx.answerCbQuery('⏳');
+    try {
+      const w = await DepSvc.getDepositWallet(ctx.from.id, net);
+      const extra = w.address_extra ? `\n🔑 <b>Memo / Payment ID</b> (gönderirken ZORUNLU): <code>${w.address_extra}</code>` : '';
+      const url = w.label && /^https/.test(String(w.label)) ? `\n🔗 <a href="${w.label}">Ödeme sayfası</a>` : '';
+      await ctx.reply(
+        `${DepSvc.networkLabel(w.network)} — <b>kişiye özel yatırım adresin</b>\n` +
+        `📍 Adres: <code>${w.address || '—'}</code>${extra}${url}\n\n` +
+        `Ödeme ağda doğrulanınca tutar <b>otomatik olarak</b> bakiyene yazılır (birkaç dakika).\n` +
+        `Minimum: 1$ · Bu adres yalnızca sana özel.`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (e) {
+      await ctx.reply(`❌ ${e.message}`);
+    }
   });
 
   bot.action('menu_referral', async (ctx) => {
@@ -999,6 +1039,18 @@ function setupUserHandlers(bot) {
 
       // Geçerliyse ödemeye geç
       await startPaymentProcess(ctx, lang, ctx.session.productId, input);
+
+    } else if (ctx.session && ctx.session.state === 'waiting_topup_txid') {
+      const id = ctx.message.text.trim();
+      ctx.session.state = null;
+      if (!/^[A-Za-z0-9_-]{6,64}$/.test(id)) return ctx.reply(t(lang, 'payment_not_found'));
+      ctx.reply(t(lang, 'payment_checking'));
+      const r = await DepositPoller.topupNow(ctx.bot, ctx.from.id, id);
+      // credited path already notified via topupNow; here only the rest:
+      if (r.ok && r.queued) return ctx.reply(t(lang, 'topup_queued'));
+      if (!r.ok && r.reason === 'used') return ctx.reply(t(lang, 'txid_used'));
+      if (!r.ok) return ctx.reply(t(lang, 'payment_not_found'));
+      return;
 
     } else if (ctx.session && ctx.session.state === 'waiting_txid') {
       const txid = ctx.message.text.trim();

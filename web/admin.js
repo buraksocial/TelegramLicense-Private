@@ -259,6 +259,19 @@ async function handleAdmin(req, res, url, sess) {
     return json(res, 200, { data: rows });
   }
 
+  // ---- multi-network deposit wallets + provider events ----
+  if (M === 'GET' && route === 'deposits') {
+    const DepSvc = require('../src/services/DepositProviders');
+    const wallets = db.prepare(`SELECT dw.*, u.username FROM deposit_wallets dw LEFT JOIN users u ON u.id=dw.user_id ORDER BY dw.id DESC LIMIT 100`).all();
+    const events = db.prepare('SELECT * FROM deposit_events ORDER BY id DESC LIMIT 100').all();
+    return json(res, 200, {
+      provider: DepSvc.providerConfigured() ? DepSvc.provider : null,
+      networks: DepSvc.enabledNetworks().map((n) => ({ key: n.key, label: n.label, icon: n.icon })),
+      wallets: wallets.map((w) => ({ id: w.id, user: w.user_id, username: w.username, provider: w.provider, network: w.network, address: w.address, memo: w.address_extra, status: w.status, url: w.label, created: w.created_at })),
+      events: events.map((e) => ({ id: e.id, ts: e.ts, provider: e.provider, user: e.user_id, ref: e.ref, usd: e.amount_usd, status: e.status, credited: !!e.credited }))
+    });
+  }
+
   // ---- api keys ----
   if (M === 'GET' && route === 'keys') {
     const rows = db.prepare('SELECT id, name, key_preview, scopes, rate_limit_per_min, daily_limit, user_id, webhook_url, enabled, created_at, last_used_at FROM api_keys ORDER BY id DESC').all();

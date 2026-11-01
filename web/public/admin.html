@@ -68,7 +68,7 @@ async function adm(path, opts){
 
 var TABS = [
   ['dash','📊 Panel'],['orders','🧾 Siparişler'],['users','👥 Kullanıcılar'],
-  ['products','📦 Ürünler'],['matches','🧠 Eşleşmeler'],['reservations','⏳ Rezervasyon'],
+  ['products','📦 Ürünler'],['deposits','🌐 Kripto Yatırma'],['matches','🧠 Eşleşmeler'],['reservations','⏳ Rezervasyon'],
   ['keys','🔑 API Anahtarları'],['apilog','📡 API Kayıtlar']
 ];
 
@@ -304,7 +304,23 @@ async function vApilog(errors){
 window.vApilogBtn = function(){ vApilog(false); };
 window.vApilogErr = function(){ vApilog(true); };
 
-var views = { dash:vDash, orders:vOrders, users:vUsers, products:vProducts, matches:vMatches, reservations:vReservations, keys:vKeys, apilog:vApilog };
+// ---------------------------------------------------------------- deposits
+async function vDeposits(){
+  $('#view').innerHTML='<div class="card">…</div>';
+  var d = await adm('deposits');
+  $('#view').innerHTML =
+    '<div class="card"><h3 style="margin:0 0 10px">🌐 Kripto Yatırma — sağlayıcı: <b>'+(d.provider||'<span class=\"bad\">yapılandırılmamış (.env: DEPOSIT_PROVIDER)</span>')+'</b></h3>'
+    +'<table><tr><th>#</th><th>Kullanıcı</th><th>Sağlayıcı</th><th>Ağ</th><th>Adres</th><th>Memo</th><th>Durum</th></tr>'
+    + (d.wallets.length?d.wallets.map(function(w){
+      return '<tr><td>'+w.id+'</td><td>'+w.user+(w.username?' <span class="mut">@'+esc(w.username)+'</span>':'')+'</td><td class="mut">'+w.provider+'</td><td>'+esc(w.network)+'</td><td><code>'+esc(w.address||'')+'</code></td><td>'+esc(w.memo||'—')+'</td><td class="'+(w.status==='ACTIVE'?'ok':'mut')+'">'+w.status+'</td></tr>';
+    }).join(''):'<tr><td colspan="7" class="mut">cüzdan yok</td></tr>')+'</table></div>'
+    +'<div class="card"><h3 style="margin:0 0 10px">📥 Provider Ödeme Olayları</h3><table><tr><th>Ts</th><th>Sağlayıcı</th><th>Kullanıcı</th><th>Ref</th><th>USD</th><th>Durum</th><th>Yüklendi</th></tr>'
+    + (d.events.length?d.events.map(function(e){
+      return '<tr><td class="mut">'+e.ts+'</td><td>'+e.provider+'</td><td>'+(e.user||'—')+'</td><td><code>'+esc(e.ref||'')+'</code></td><td>'+money(e.usd||0)+'</td><td class="mut">'+esc(e.status||'')+'</td><td class="'+(e.credited?'ok':'bad')+'">'+(e.credited?'✅':'❌')+'</td></tr>';
+    }).join(''):'<tr><td colspan="7" class="mut">olay yok</td></tr>')+'</table></div>';
+}
+
+var views = { dash:vDash, orders:vOrders, users:vUsers, products:vProducts, deposits:vDeposits, matches:vMatches, reservations:vReservations, keys:vKeys, apilog:vApilog };
 
 async function boot(){
   if(!state.token){ location.href='/'; return; }

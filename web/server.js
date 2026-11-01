@@ -33,6 +33,7 @@ const { parseQuantity, parseMoney } = require('../src/utils/money');
 const { checkTransaction } = require('../src/services/binance');
 const { WEB_PORT, WEB_ENABLED, ADMIN_ID, BOT_TOKEN } = require('../src/config/env');
 const { handleAdmin } = require('./admin');
+const DepSvc = require('../src/services/DepositProviders');
 
 const TOKEN_TTL_MS = 7 * 24 * 3600 * 1000;
 const SESSIONS = new Map(); // token -> { user_id, expires }
@@ -121,9 +122,52 @@ function publicProduct(p, lang) {
   };
 }
 
+/** Raw-text body reader — provider IPN signatures verify over raw bytes. */
+function readRaw(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => { data += c; if (data.length > limit) { reject(new Error('ipn body too big')); req.destroy(); } });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+/**
+ * /ipn/nowpayments + /ipn/coinpayments — provider payment webhooks.
+ * Verified by HMAC over the raw body; crediting is idempotent inside
+ * DepositProviders (deposit_events UNIQUE(provider,ref)).
+ */
+async function handleIpn(req, res, url) {
+  const isNp = url.pathname === '/ipn/nowpayments';
+  let raw = '';
+  try { raw = await readRaw(req); } catch (e) { return json(res, 400, { error: 'body' }); }
+  const sig = String(req.headers[isNp ? 'x-nowpayments-sig' : 'x-coinpay-signature'] || '');
+  const ok = isNp ? DepSvc.verifyNpSignature(raw, sig) : DepSvc.verifyCpSignature(raw, sig);
+  if (!ok) {
+    console.warn(`[ipn:${isNp ? 'np' : 'cp'}] BAD SIGNATURE from ${req.socket.remoteAddress}`);
+    return json(res, 401, { error: 'invalid signature' });
+  }
+  let body = null;
+  try {
+    body = isNp ? JSON.parse(raw) : Object.fromEntries(new URLSearchParams(raw));
+  } catch (e) { return json(res, 400, { error: 'bad payload' }); }
+  try {
+    const r = isNp
+      ? await DepSvc.handleNpIpn(body, global.__LICENSE_BOT)
+      : await DepSvc.handleCpIpn(body, global.__LICENSE_BOT);
+    console.log(`[ipn:${isNp ? 'np' : 'cp'}]`, JSON.stringify(r).slice(0, 200));
+  } catch (e) { console.error('[ipn] handler error:', e.message); }
+  return json(res, 200, { ok: true }); // 200 even when ignored — stop provider retries
+}
+
 async function handleApi(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean); // ['api', ...]
   const route = seg.slice(1).join('/');
+
+  // ---- provider IPN webhooks (public, signature-verified) ----
+  if (url.pathname === '/ipn/nowpayments' || url.pathname === '/ipn/coinpayments') {
+    return handleIpn(req, res, url);
+  }
 
   // ---- admin panel surface (same widget session, ADMIN_ID only) ----
   if (url.pathname.startsWith('/api/admin/')) {
@@ -148,7 +192,7 @@ async function handleApi(req, res, url) {
       }
       botUsername = await startWebServer._me || null;
     } catch (e) {}
-    return json(res, 200, { languages: langs, categories: cats, currency: 'USD', bot_username: botUsername });
+    return json(res, 200, { languages: langs, categories: cats, currency: 'USD', bot_username: botUsername, crypto_deposits: DepSvc.providerConfigured() });
   }
 
   if (route === 'login' && req.method === 'POST') {
@@ -256,6 +300,28 @@ async function handleApi(req, res, url) {
       lang,
       is_admin: user.id === ADMIN_ID
     });
+  }
+
+  // ---- multi-network crypto deposits ("kişiye özel cüzdan") ----
+  if (route === 'deposits' && req.method === 'GET') {
+    if (!DepSvc.providerConfigured()) return json(res, 200, { enabled: false, data: [] });
+    const rows = DepSvc.listUserWallets(userId);
+    return json(res, 200, {
+      enabled: true, provider: DepSvc.provider,
+      networks: DepSvc.enabledNetworks().map((n) => ({ key: n.key, label: n.label, icon: n.icon })),
+      data: rows.map((w) => ({ network: w.network, label: DepSvc.networkLabel(w.network), address: w.address, memo: w.address_extra || null, url: w.label || null }))
+    });
+  }
+  if (route === 'deposits' && req.method === 'POST') {
+    if (!DepSvc.providerConfigured()) return json(res, 400, { error: 'kripto yatırma devre dışı' });
+    const body = await readBody(req);
+    try {
+      const w = await DepSvc.getDepositWallet(userId, String(body.network || ''));
+      return json(res, 200, {
+        network: w.network, label: DepSvc.networkLabel(w.network),
+        address: w.address, memo: w.address_extra || null, url: w.label || null
+      });
+    } catch (e) { return json(res, 400, { error: e.message }); }
   }
 
   if (route === 'products' || /^product\/\d+$/.test(route)) {
@@ -465,7 +531,7 @@ function startWebServer() {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     try {
-      if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
+      if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ipn/')) await handleApi(req, res, url);
       else serveStatic(req, res, url);
     } catch (e) {
       console.error('[Web] error:', e.message);
