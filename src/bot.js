@@ -50,6 +50,10 @@ MarginWatchdog.start(bot);
 const TranslationService = require('./services/TranslationService');
 TranslationService.start(bot);
 
+// Bekleyen Binance yatırmaları → otomatik doğrula + bakiye yükle
+const DepositPoller = require('./services/DepositPoller');
+DepositPoller.start(bot);
+
 // Web mağaza (bot ile aynı DB/fiyat/teslim mantığı — CheckoutService)
 try { require('../web/server').startWebServer(); }
 catch (e) { console.error('[Web] başlatılamadı:', e.message); }

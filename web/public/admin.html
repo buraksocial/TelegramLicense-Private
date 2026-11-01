@@ -97,15 +97,24 @@ async function vDash(){
    + stat('🗂 Sipariş (tüm zamanlar)', d.all.orders, money(d.all.sales)+' · '+money(d.all.profit))
    + stat('👥 Kullanıcı', d.users, d.negative_balances+' caride')
    + '</div></div>'
-   + '<div class="card"><h3 style="margin:0 0 10px">Kuyruklar &amp; API</h3><div class="grid">'
+   + '<div class="card"><h3 style=\"margin:0 0 10px\">Kuyruklar &amp; API</h3><div class="grid">'
    + stat('⏳ Bekleyen rezervasyon', d.pending_reservations)
    + stat('🧠 Onay bekleyen eşleşme', d.pending_matches)
+   + stat('💳 Bekleyen Binance yatırması', d.pending_topups || 0)
    + stat('📡 API istek (24s)', d.api.requests_24h, d.api.errors_24h+' hata')
    + '</div></div>'
+   + '<div class="card" id="topupCard"><h3 style=\"margin:0 0 10px\">💳 Bekleyen / Son Yatırmalar</h3><div id=\"topups\">…</div></div>'
    + '<div class="card"><h3 style="margin:0 0 10px">🏆 En Çok Satan (7 gün)</h3><table>'
    + (d.top_products.length ? d.top_products.map(function(p){return '<tr><td>'+esc(p.product)+'</td><td>'+p.orders+' sipariş</td><td><b>'+money(p.sales)+'</b></td></tr>'}).join('') : '<tr><td class="mut">kayıt yok</td></tr>')
    + '</table></div>';
   function stat(k,v,sub){ return '<div class="stat card" style="margin:0"><b>'+v+'</b><span>'+k+'</span><div class="mut" style="font-size:11px">'+(sub||'')+'</div></div>'; }
+  adm('topups').then(function(td){
+    var cls = { PENDING:'warn', CREDITED:'ok', EXPIRED:'bad', MANUAL:'mut' };
+    $('#topups').innerHTML = '<table><tr><th>#</th><th>Durum</th><th>Kullanıcı</th><th>TXID</th><th>Beklenen</th><th>Onaylanan</th><th>Kaynak</th><th>Tarih</th></tr>'
+     + (td.data.length ? td.data.slice(0,20).map(function(r){
+        return '<tr><td>'+r.id+'</td><td class="'+(cls[r.status]||'mut')+'">'+r.status+'</td><td>'+r.user+(r.username?' <span class="mut">@'+esc(r.username)+'</span>':'')+'</td><td><code>'+esc(r.txid)+'</code></td><td>'+money(r.expected_amount)+'</td><td>'+(r.confirmed_amount!=null?money(r.confirmed_amount):'—')+'</td><td class="mut">'+esc(r.source)+'</td><td class="mut">'+(r.created_at||'')+'</td></tr>';
+      }).join('') : '<tr><td colspan="8" class="mut">kayıt yok</td></tr>');
+  }).catch(function(){ $('#topups').textContent='—'; });
 }
 
 // ---------------------------------------------------------------- orders

@@ -63,6 +63,7 @@ async function handleAdmin(req, res, url, sess) {
     const negBal = db.prepare('SELECT COUNT(*) c FROM users WHERE balance < 0').get().c;
     const reservations = db.prepare("SELECT COUNT(*) c FROM reservations WHERE status='PENDING'").get().c;
     const matches = db.prepare("SELECT COUNT(*) c FROM product_matches WHERE status='pending'").get().c;
+    const topups = db.prepare("SELECT COUNT(*) c FROM pending_topups WHERE status='PENDING'").get().c;
     const api = db.prepare("SELECT COUNT(*) c FROM api_log WHERE ts >= datetime('now','-1 day')").get().c;
     const apiErr = db.prepare("SELECT COUNT(*) c FROM api_log WHERE ts >= datetime('now','-1 day') AND status >= 400").get().c;
     const top = db.prepare(`SELECT product_id, COUNT(*) o, SUM(sell_usd) s FROM orders WHERE created_at >= datetime('now','-7 days') GROUP BY product_id ORDER BY s DESC LIMIT 5`).all()
@@ -72,6 +73,7 @@ async function handleAdmin(req, res, url, sess) {
       week: { orders: week.c, sales: round2(week.s), profit: round2(week.p) },
       all: { orders: total.c, sales: round2(total.s), profit: round2(total.p) },
       users, negative_balances: negBal, pending_reservations: reservations, pending_matches: matches,
+      pending_topups: topups,
       api: { requests_24h: api, errors_24h: apiErr }, top_products: top
     });
   }
@@ -247,6 +249,14 @@ async function handleAdmin(req, res, url, sess) {
     const rows = db.prepare(`SELECT r.id, r.user_id, r.qty, r.fulfilled_qty, r.sell_usd, r.status, r.created_at, p.name pn
       FROM reservations r LEFT JOIN products p ON p.id=r.product_id WHERE r.status='PENDING' ORDER BY r.id DESC LIMIT 100`).all();
     return json(res, 200, { data: rows.map((r) => ({ id: r.id, user: r.user_id, product: CS.localized({ name: r.pn }, 'tr'), qty: r.qty, fulfilled: r.fulfilled_qty, paid: round2(r.sell_usd), date: r.created_at })) });
+  }
+
+  // ---- pending binance top-ups (auto-verified by DepositPoller) ----
+  if (M === 'GET' && route === 'topups') {
+    const rows = db.prepare(`SELECT pt.*, u.username FROM pending_topups pt
+      LEFT JOIN users u ON u.id = pt.user_id
+      ORDER BY CASE pt.status WHEN 'PENDING' THEN 0 ELSE 1 END, pt.id DESC LIMIT 100`).all();
+    return json(res, 200, { data: rows });
   }
 
   // ---- api keys ----

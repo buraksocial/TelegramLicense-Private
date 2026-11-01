@@ -340,8 +340,30 @@ async function handleApi(req, res, url) {
         const existing = db.prepare('SELECT 1 FROM transactions WHERE txid = ?').get(givenTx);
         if (existing) return json(res, 409, { error: 'bu txid zaten kullanılmış' });
         const info = await checkTransaction(givenTx);
-        if (!info || info.status !== 'SUCCESS') return json(res, 402, { error: 'ödeme bulunamadı/pending' });
-        if (info.amount < total) return json(res, 402, { error: `yetersiz tutar (gönderilen: ${info.amount}, gereken: ${total})` });
+        if (!info || info.status !== 'SUCCESS') {
+          // not settled yet — the shared DepositPoller credits automatically
+          db.prepare(`INSERT OR IGNORE INTO pending_topups (user_id, txid, expected_amount, product_id, qty, source, note)
+                      VALUES (?,?,?,?,?,?,?)`)
+            .run(userId, givenTx, total, product.id, qty, 'web', 'unverified at submit');
+          return json(res, 200, {
+            ok: true, kind: 'queued', paid: total,
+            message: 'Ödemen henüz sonuçlanmadı — BEKLEYEN YATIRMA olarak kaydedildi. Binance onaylayınca tutar otomatik olarak bakiyene yüklenecek ve bot sana mesaj atacak. Sipariş numarasını tekrar göndermene gerek yok.'
+          });
+        }
+        if (info.amount < total) {
+          // confirmed but short — credit exactly what was paid
+          const paidIn = round2(info.amount);
+          const { getUsdTryRate } = require('../src/utils/currency');
+          const tryRate = await getUsdTryRate().catch(() => 47.22);
+          db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(paidIn, userId);
+          db.prepare('INSERT INTO transactions (txid, user_id, product_id, amount, status, amount_try) VALUES (?,?,?,?,?,?)')
+            .run(givenTx, userId, product.id, paidIn, 'SUCCESS', paidIn * tryRate);
+          const nb = round2(db.prepare('SELECT balance FROM users WHERE id = ?').get(userId).balance);
+          return json(res, 200, {
+            ok: true, kind: 'topped_up', paid: paidIn, balance: nb,
+            message: `Gönderilen tutar eksikti (${paidIn}$ / gereken ${total}$). Gönderdiğin tutar bakiyene yüklendi (yeni bakiye: ${nb}$). Siparişi bakiye ile tamamlayabilirsin.`
+          });
+        }
         result = await CS.fulfill(userId, product, qty, {
           paidAmount: total, unitBase,
           chosenPs: lock ? lock.psId : null,

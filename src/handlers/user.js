@@ -1017,13 +1017,32 @@ function setupUserHandlers(bot) {
       // 2. Binance API ile TXID sorgusu
       const paymentInfo = await checkTransaction(txid);
 
+      // Not settled *right now* (Pay propagation, too-early submit, temporary
+      // API 429) is no longer a dead end: queue it — DepositPoller credits
+      // automatically once Binance history confirms, exactly once per txid.
       if (!paymentInfo || paymentInfo.status !== 'SUCCESS') {
-        return ctx.reply(t(lang, 'payment_not_found'));
+        db.prepare(`INSERT OR IGNORE INTO pending_topups (user_id, txid, expected_amount, product_id, qty, source, note)
+                    VALUES (?,?,?,?,?,?,?)`)
+          .run(ctx.from.id, txid, totalPrice, productId, qty, 'bot', 'unverified at submit');
+        return ctx.reply(t(lang, 'topup_queued'));
       }
 
       // 3. Tutar Doğrulaması (Toplam tutar)
       if (paymentInfo.amount < totalPrice) {
-        return ctx.reply(t(lang, 'insufficient_payment', { required: totalPrice, sent: paymentInfo.amount }));
+        // Confirmed but short — credit exactly what was sent (no order loss,
+        // no manual work), then the user re-orders with the balance.
+        const paid = Math.round((paymentInfo.amount + Number.EPSILON) * 100) / 100;
+        const balRow = db.prepare('SELECT balance FROM users WHERE id = ?').get(ctx.from.id);
+        const nextBal = Math.round(((balRow.balance || 0) + paid + Number.EPSILON) * 100) / 100;
+        db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(paid, ctx.from.id);
+        const { getUsdTryRate } = require('../utils/currency');
+        const tryRate = await getUsdTryRate().catch(() => 47.22);
+        db.prepare('INSERT INTO transactions (txid, user_id, product_id, amount, status, amount_try) VALUES (?,?,?,?,?,?)')
+          .run(txid, ctx.from.id, productId, paid, 'SUCCESS', paid * tryRate);
+        return ctx.reply(
+          t(lang, 'insufficient_payment', { required: totalPrice, sent: paid }) +
+          '\n\n' + t(lang, 'topup_credited', { amount: paid, balance: nextBal })
+        );
       }
 
       await processSuccessfulPayment(ctx, lang, txid, paymentInfo.amount);

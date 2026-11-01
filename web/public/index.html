@@ -72,7 +72,8 @@ const I18N={
   promo_h:'🎁 Promosyon Kodu',promo_ph:'KOD',promo_btn:'Kullan',
   caride_note:'Hesabın caride (negatif bakiye). Bakiye ile ödeme için önce yükleme yap.',
   buy_t:'Satın al',svc:'Hizmetler',best:'⭐ en iyi',stock:'stok',ok:'Sipariş tamam!',
-  copied:'kopyalandı',insufficient:'bakiye yetersiz',lock_expired:'Fiyat süresi doldu, tekrar dene'},
+  copied:'kopyalandı',insufficient:'bakiye yetersiz',lock_expired:'Fiyat süresi doldu, tekrar dene',
+  queued_t:'🕐 Ödemen bekliyor',dep_t:'Bakiyene yüklendi'},
  en:{app_name:'Store',nav_orders:'My Orders',nav_logout:'Logout',login_h:'Sign in',
   login_p:'Sign in with your Telegram account to continue. Balance, discounts and orders are shared with the bot.',
   login_retry:'🔄 Reload',login_id:'Telegram ID',login_btn:'Sign in',err_login:'Login failed',choose_cat:'🗂 Choose category',all:'All',
@@ -82,7 +83,8 @@ const I18N={
   promo_h:'🎁 Promo Code',promo_ph:'CODE',promo_btn:'Redeem',
   caride_note:'Account is in the red (negative). Top up before paying with balance.',
   buy_t:'Purchase',svc:'Services',best:'⭐ best',stock:'stock',ok:'Order complete!',
-  copied:'copied',insufficient:'insufficient balance',lock_expired:'Price expired, try again'}};
+  copied:'copied',insufficient:'insufficient balance',lock_expired:'Price expired, try again',
+  queued_t:'🕐 Payment pending',dep_t:'Credited to balance'}};
 const t=k=>(I18N[state.lang]||I18N.tr)[k]||k;
 
 async function api(path,opts={}){
@@ -217,6 +219,11 @@ async function openCheckout(sel){
 }
 function closeModal(){$('#modal').classList.remove('on')}
 function renderDelivered(r){
+  if(r.kind==='queued'||r.kind==='topped_up'){
+    $('#view').innerHTML=`<h2>${r.kind==='queued'?t('queued_t'):t('dep_t')}</h2><div class="order"><p style="margin:0">${esc(r.message||'')}</p></div>
+    <div class="rowbtns"><button class="ghost" onclick="loadShell()">${t('back')}</button></div>`;
+    return;
+  }
   const items=(r.delivered||[]).map(x=>`<div class="order"><code>${esc(x)}</code></div>`).join('');
   $('#view').innerHTML=`<h2>✅ ${t('ok')}</h2><div class="muted">${r.qty} × — ${money(r.paid)}</div>
   ${r.kind==='reservation'?`<div class="order">${t('pend')}</div>`:items}
