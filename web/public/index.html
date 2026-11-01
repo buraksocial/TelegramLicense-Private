@@ -69,6 +69,7 @@ const I18N={
   pay_bal:'💳 Bakiye ile öde',pay_bn:'🟡 Binance (TXID)',back:'🔙 Geri',orders_t:'Siparişlerim',
   no_orders:'Henüz sipariş yok.',delivered:'Teslim edildi',pend:'Bekliyor',bal:'Bakiye',
   promo_h:'🎁 Promosyon Kodu',promo_ph:'KOD',promo_btn:'Kullan',
+  caride_note:'Hesabın caride (negatif bakiye). Bakiye ile ödeme için önce yükleme yap.',
   buy_t:'Satın al',svc:'Hizmetler',best:'⭐ en iyi',stock:'stok',ok:'Sipariş tamam!',
   copied:'kopyalandı',insufficient:'bakiye yetersiz',lock_expired:'Fiyat süresi doldu, tekrar dene'},
  en:{app_name:'Store',nav_orders:'My Orders',nav_logout:'Logout',login_h:'Sign in',
@@ -78,6 +79,7 @@ const I18N={
   pay_bal:'💳 Pay with balance',pay_bn:'🟡 Binance (TXID)',back:'🔙 Back',orders_t:'My orders',
   no_orders:'No orders yet.',delivered:'Delivered',pend:'Pending',bal:'Balance',
   promo_h:'🎁 Promo Code',promo_ph:'CODE',promo_btn:'Redeem',
+  caride_note:'Account is in the red (negative). Top up before paying with balance.',
   buy_t:'Purchase',svc:'Services',best:'⭐ best',stock:'stock',ok:'Order complete!',
   copied:'copied',insufficient:'insufficient balance',lock_expired:'Price expired, try again'}};
 const t=k=>(I18N[state.lang]||I18N.tr)[k]||k;
@@ -92,12 +94,13 @@ async function api(path,opts={}){
 }
 function toast(m){const el=$('#toast');el.textContent=m;el.style.display='block';setTimeout(()=>el.style.display='none',3200)}
 function money(n){return Number(n||0).toFixed(2)+'$'}
+function setBal(v){const c=$('#balChip');if(!c)return;c.textContent=t('bal')+': '+money(v);c.style.color=v<0?'#e5484d':''}
 
 async function loadShell(){
   try{const cfg=await api('config');state.categories=cfg.categories||[];state.botUsername=cfg.bot_username||null;}catch(e){}
   if(!state.token){renderLogin();return}
   try{state.me=await api('me');}catch(e){if(e.status===401){state.token=null;localStorage.removeItem('shop_token');renderLogin();return}}
-  $('#balChip').style.display='block';$('#balChip').textContent=t('bal')+': '+money(state.me.balance);
+  $('#balChip').style.display='block';setBal(state.me.balance);
   $('#btnOut').style.display='inline-block';
   const prods=await api('products');
   state.products=prods.products||[];
@@ -188,7 +191,7 @@ async function openCheckout(sel){
     <button id="payBal" ${state.me&&state.me.balance<unit?'disabled':''}>${t('pay_bal')} (${money(state.me?state.me.balance:0)})</button>
     <button class="ghost" id="payBn">${t('pay_bn')}</button>
     <button class="ghost" id="cancel">❌</button>
-  </div><div id="bnBox" style="display:none"><label>TXID</label><input id="inTx" placeholder="işlem hash/id"><button id="bnGo" style="margin-top:8px">${t('pay')}</button></div>`;
+  </div>${state.me&&state.me.balance<0?`<p style="color:#e5484d;font-size:13px;margin:6px 0 0">⚠️ ${t('caride_note')}</p>`:''}<div id="bnBox" style="display:none"><label>TXID</label><input id="inTx" placeholder="işlem hash/id"><button id="bnGo" style="margin-top:8px">${t('pay')}</button></div>`;
   $('#modal').classList.add('on');
   const qtyEl=$('#inQty');
   const upd=()=>{$('#tt').textContent=money(Number(qtyEl.value||1)*unit);
@@ -203,7 +206,7 @@ async function openCheckout(sel){
       const r=await api('checkout',{method:'POST',headers:{'idempotency-key':idem},
         body:JSON.stringify(Object.assign({product_id:d.product.id,qty,lock_token:lock,pay:pmethod,reserve},extra||{}))});
       closeModal();renderDelivered(r);
-      state.me.balance=await api('me').then(m=>m.balance);$('#balChip').textContent=t('bal')+': '+money(state.me.balance);
+      state.me.balance=await api('me').then(m=>m.balance);setBal(state.me.balance);
     }catch(e){toast(e.message)}
   };
   $('#payBal').onclick=()=>pay('balance');
@@ -235,7 +238,7 @@ async function renderOrders(){
     const code=$('#inPromo').value.trim(); if(!code)return;
     try{const r=await api('promo',{method:'POST',body:JSON.stringify({code})});
       $('#promoMsg').textContent=r.message;
-      if(r.ok){state.me.balance=r.balance;$('#balChip').textContent=t('bal')+': '+money(r.balance);}
+      if(r.ok){state.me.balance=r.balance;setBal(r.balance);}
     }catch(e){$('#promoMsg').textContent=e.message}
   };
 }

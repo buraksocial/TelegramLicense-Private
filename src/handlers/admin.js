@@ -1915,15 +1915,16 @@ function setupAdminHandlers(bot) {
         ctx.session.adminState = null;
         return ctx.reply('❌ Kullanıcı kaydı bulunamadı (kişi botu hiç başlatmamış).');
       }
-      if ((before.balance || 0) + amount < 0) {
-        return ctx.reply(`❌ Bakiye eksiye düşer (mevcut: ${(before.balance || 0).toFixed(2)}$). Daha küçük bir silme tutarı girin veya iptal edin.`);
-      }
+      // Cari hesabı: eksi bakiye SERBEST (manuel siparişin bedeli düşülür).
+      // Eksi bakiyeli üye bot/web'den kendiliğinden alışveriş yapamaz — bakiye
+      // karşılaştırması (< total) bunu zaten engeller; admin yükleyince düzelir.
+      const newBal = (before.balance || 0) + amount;
 
       db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(amount, uid);
       sendWalletTopUpLog(ctx.telegram, uid, amount);
-      const after = ((before.balance || 0) + amount).toFixed(2);
       ctx.reply(
-        `✅ ${amount >= 0 ? 'Yükleme' : 'Düşüm'}: <b>${amount}$</b>\nYeni bakiye: <b>${after}$</b> (<code>${uid}</code>)`,
+        `✅ ${amount >= 0 ? 'Yükleme' : 'Düşüm'}: <b>${amount}$</b>\nYeni bakiye: <b>${newBal.toFixed(2)}$</b> (<code>${uid}</code>)` +
+        (newBal < 0 ? `\n⚠️ Üye <b>caride</b> (${newBal.toFixed(2)}$) — bakiye yüklenene kadar kendi sipariş veremez.` : ''),
         { parse_mode: 'HTML' }
       );
       ctx.session.adminState = null;

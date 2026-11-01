@@ -262,9 +262,13 @@ function setupUserHandlers(bot) {
   bot.action('menu_wallet', async (ctx) => {
     const lang = getUserLang(ctx.from.id);
     const user = db.prepare('SELECT balance FROM users WHERE id = ?').get(ctx.from.id);
-    const balance = user ? (user.balance || 0).toFixed(2) : '0.00';
+    const numBal = user ? (user.balance || 0) : 0;
+    const balance = numBal.toFixed(2);
+    const caride = numBal < 0
+      ? `\n\n⚠️ ${t(lang, 'wallet_caride') || 'Hesabınız caride (negatif). Bakiye ile sipariş vermek için bakiyenizi yüklemeniz gerekir.'}`
+      : '';
 
-    ctx.editMessageText(`💼 <b>Wallet Balance:</b> ${balance}$`, {
+    ctx.editMessageText(`💼 <b>Wallet Balance:</b> ${balance}$${caride}`, {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
