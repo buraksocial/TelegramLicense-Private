@@ -3,6 +3,10 @@ const { calculateSignature, checkTransaction } = require('../services/binance');
 const { t } = require('../utils/i18n');
 const { BINANCE_PAY_ID } = require('../config/env');
 const { sendOrderLog, sendWalletTopUpLog } = require('../utils/logger');
+// Pricing/identity helpers come from CheckoutService — the SAME code the web
+// store runs, so bot and web can never quote different prices.
+const CS = require('../services/CheckoutService');
+const { getUserLang, getUserRank, getReservationFee, getUserUnitPrice, calculateTotalPrice } = CS;
 
 // Yardımcı Fonksiyon: Ürün ismini dile göre al
 function getProductName(product, lang) {
@@ -14,139 +18,15 @@ function getProductName(product, lang) {
   }
 }
 
-function getUserLang(userId) {
-  const user = db.prepare('SELECT lang FROM users WHERE id = ?').get(userId);
-  return user?.lang || 'en';
-}
-
-function getUserRank(userId) {
-  const user = db.prepare('SELECT total_purchases FROM users WHERE id = ?').get(userId);
-  if (!user) return null;
-
-  return db.prepare('SELECT * FROM ranks WHERE min_purchases <= ? ORDER BY min_purchases DESC LIMIT 1').get(user.total_purchases || 0);
-}
-
-function getReservationFee(userId) {
-  const userRow = db.prepare('SELECT custom_reservation_fee FROM users WHERE id = ?').get(userId);
-  if (userRow && userRow.custom_reservation_fee !== null) {
-    return parseFloat(userRow.custom_reservation_fee);
-  }
-  const feeRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('reservation_fee');
-  return feeRow ? parseFloat(feeRow.value) : 0.10;
-}
-
-function getUserUnitPrice(userId, product, baseUnitOverride = null) {
-  // 1. Check Pricing Group
-  const userGroup = db.prepare('SELECT g.id, g.discount_percent FROM user_pricing_groups u JOIN pricing_groups g ON u.group_id = g.id WHERE u.user_id = ?').get(userId);
-  if (userGroup) {
-    const groupProduct = db.prepare('SELECT price FROM pricing_group_products WHERE group_id = ? AND product_id = ?').get(userGroup.id, product.id);
-    if (groupProduct) return groupProduct.price;
-    const base = baseUnitOverride !== null ? baseUnitOverride : product.price;
-    if (userGroup.discount_percent > 0) return base * (1 - (userGroup.discount_percent / 100));
-    return base; // If group has no specific product or discount, return original
-  }
-
-  // 2. Check Rank
-  const rank = getUserRank(userId);
-  let price = baseUnitOverride !== null ? baseUnitOverride : product.price;
-
-  if (rank) {
-    const rankProduct = db.prepare('SELECT special_price FROM rank_special_prices WHERE rank_id = ? AND product_id = ?').get(rank.id, product.id);
-    if (rankProduct) {
-      price = rankProduct.special_price;
-    } else if (rank.discount_percent > 0) {
-      price = price * (1 - (rank.discount_percent / 100));
-    }
-  }
-
-  // 3. Check Promo Discount
-  const isActualReseller = db.prepare('SELECT * FROM resellers WHERE user_id = ?').get(userId);
-  const userRow = db.prepare('SELECT reseller_promo_ban FROM users WHERE id = ?').get(userId);
-
-  if (!isActualReseller && (!userRow || userRow.reseller_promo_ban === 0)) {
-    // Only normal users can use promos
-    const activePromo = db.prepare(`
-      SELECT p.value 
-      FROM promo_codes p 
-      JOIN user_promos up ON p.id = up.promo_id 
-      WHERE up.user_id = ? 
-        AND p.type = 'discount' 
-        AND (up.expires_at IS NULL OR up.expires_at > CURRENT_TIMESTAMP)
-      ORDER BY p.value DESC LIMIT 1
-    `).get(userId);
-
-    if (activePromo && activePromo.value > 0) {
-      price = price * (1 - (activePromo.value / 100));
-    }
-  }
-
-  return price;
-}
-
-function calculateTotalPrice(userId, product, qty, baseUnitOverride = null) {
-  let unitPrice = getUserUnitPrice(userId, product, baseUnitOverride);
-
-  // Bulk discounts apply only if no custom pricing group and no rank override?
-  // User didn't specify bulk discounts relation to Rank. I'll keep bulk discounts on top of unitPrice if they don't have a group.
-  const userGroup = db.prepare('SELECT * FROM user_pricing_groups WHERE user_id = ?').get(userId);
-  if (!userGroup) {
-    const bestDiscount = db.prepare('SELECT * FROM product_bulk_discounts WHERE product_id = ? AND min_qty <= ? ORDER BY min_qty DESC LIMIT 1').get(product.id, qty);
-    if (bestDiscount) {
-      if (bestDiscount.fixed_price !== null && bestDiscount.fixed_price !== undefined) {
-        unitPrice = bestDiscount.fixed_price;
-      } else if (bestDiscount.discount_percent > 0) {
-        unitPrice = unitPrice * (1 - (bestDiscount.discount_percent / 100));
-      }
-    }
-  }
-  return unitPrice * qty;
-}
-
 function setupUserHandlers(bot) {
   bot.command('promo', (ctx) => {
-    const lang = getUserLang(ctx.from.id);
     const args = ctx.message.text.split(' ');
     if (args.length < 2) {
       return ctx.reply('Kullanım: /promo <KOD>');
     }
-    const codeStr = args[1].trim();
-    // Check if the user is an actual reseller
-    const isActualReseller = db.prepare('SELECT * FROM resellers WHERE user_id = ?').get(ctx.from.id);
-    if (isActualReseller) {
-      return ctx.reply('❌ Bayiler promosyon kodu kullanamazlar.');
-    }
-
-    // Check reseller_promo_ban for sub-users
-    const userRow = db.prepare('SELECT reseller_promo_ban FROM users WHERE id = ?').get(ctx.from.id);
-    if (userRow && userRow.reseller_promo_ban === 1) {
-      return ctx.reply('❌ Promosyon kodu kullanamazsınız. Bayiden gelen bakiyenizi henüz tüketmediniz.');
-    }
-
-    // Check code
-    const promo = db.prepare('SELECT * FROM promo_codes WHERE code = ? COLLATE NOCASE').get(codeStr);
-    if (!promo) return ctx.reply('❌ Geçersiz promo kodu.');
-    if (promo.expires_at && new Date(promo.expires_at + 'Z') < new Date()) return ctx.reply('❌ Bu kodun süresi dolmuş.');
-
-    // Check if used
-    const used = db.prepare('SELECT * FROM user_promos WHERE user_id = ? AND promo_id = ?').get(ctx.from.id, promo.id);
-    if (used) return ctx.reply('❌ Bu kodu zaten kullandınız.');
-
-    const usageCount = db.prepare('SELECT COUNT(*) as c FROM user_promos WHERE promo_id = ?').get(promo.id).c;
-    if (usageCount >= promo.max_uses) return ctx.reply('❌ Bu kodun kullanım sınırı dolmuş.');
-
-    // Apply
-    const expiresAt = promo.expiry_hours ? new Date(Date.now() + promo.expiry_hours * 3600000).toISOString() : null;
-
-    if (promo.type === 'balance') {
-      db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(promo.value, ctx.from.id);
-      db.prepare('INSERT INTO user_promos (user_id, promo_id, expires_at) VALUES (?, ?, ?)').run(ctx.from.id, promo.id, expiresAt);
-      sendWalletTopUpLog(ctx.telegram, ctx.from.id, promo.value);
-      return ctx.reply(`✅ Tebrikler! Hesabınıza ${promo.value}$ bakiye eklendi.`);
-    } else {
-      db.prepare('INSERT INTO user_promos (user_id, promo_id, expires_at) VALUES (?, ?, ?)').run(ctx.from.id, promo.id, expiresAt);
-      const timeTxt = promo.expiry_hours ? `${promo.expiry_hours} saat boyunca ` : '';
-      return ctx.reply(`✅ Tebrikler! ${timeTxt}%${promo.value} indirim kazandınız!`);
-    }
+    // Same rules as the web store's promo box (CheckoutService.redeemPromo)
+    const r = CS.redeemPromo(ctx.from.id, args[1]);
+    return ctx.reply(r.message);
   });
 
 
@@ -514,21 +394,11 @@ function setupUserHandlers(bot) {
   }
 
   function issuePriceLock(ctx, product, decision, baseUnit) {
-    const token = crypto.randomBytes(8).toString('hex');
-    db.prepare('DELETE FROM price_locks WHERE expires_at < CURRENT_TIMESTAMP').run();
-    db.prepare(`
-      INSERT INTO price_locks (token, product_id, product_supplier_id, supplier_id, unit_price, expires_at)
-      VALUES (?, ?, ?, ?, ?, datetime('now', ?))
-    `).run(token, product.id,
-      decision.fulfillOffer ? decision.fulfillOffer.product_supplier_id : null,
-      decision.fulfillOffer ? decision.fulfillOffer.supplier_id : null,
-      baseUnit, `+${Math.round(PRICE_LOCK_TTL_MS / 1000)} seconds`);
-    return token;
+    return CS.issuePriceLock(product, decision.fulfillOffer || null, baseUnit, PRICE_LOCK_TTL_MS);
   }
 
   function readPriceLock(token) {
-    if (!token) return null;
-    return db.prepare("SELECT * FROM price_locks WHERE token = ? AND expires_at > datetime('now')").get(token) || null;
+    return CS.readPriceLock(token);
   }
 
   // Step 1: categories (falls back to a flat product list when none defined)
@@ -611,7 +481,9 @@ function setupUserHandlers(bot) {
             soldOut = true;
             priceNum = p.price || 0; // last known price, row stays visible
           } else {
-            priceNum = decision.displayUnit;
+            // show what THIS customer pays: rank/group/promo discounts apply
+            // on top of the dynamic base, same as at checkout.
+            priceNum = getUserUnitPrice(ctx.from.id, p, decision.displayUnit);
             visibleStock = stockCount + decision.affordable.reduce((a, o) => a + (o.realStock || 0), 0);
           }
         } catch (e) {
@@ -677,13 +549,17 @@ function setupUserHandlers(bot) {
     const serviceButtons = [];
     const { TranslationService } = require('../services/TranslationService');
     decision.all.forEach((o, i) => {
+      // class-mismatched offers are NOT the product the customer is buying —
+      // hide them entirely (a guaranteed order must never even see instant stock)
+      if (o.reason === 'warranty_mismatch') return;
       const visible = decision.maskedStock.get(o.product_supplier_id);
       const price = o.sellUnit.toFixed(2);
       const tag = o.product_supplier_id === (decision.priceOffer && decision.priceOffer.product_supplier_id) ? ' ⭐' : '';
+      const wTag = o.warranty === 'guaranteed' ? ' 🛡' : '';
       const svcName = String(TranslationService.translate(o.remote_name || o.supplier_name, lang) || '').slice(0, 38);
-      lines.push(`#${i + 1} ${svcName}: <b>$${price}</b>${tag}  ${visible != null ? `(stok ${visible})` : ''}${o.affordable ? '' : ` — ${o.reason === 'insufficient_balance' || o.reason === 'no_balance' ? (t(lang, 'badge_sold_out') || 'tükendi') : o.reason}`}`);
+      lines.push(`#${i + 1} ${svcName}: <b>$${price}</b>${tag}${wTag}  ${visible != null ? `(stok ${visible})` : ''}${o.affordable ? '' : ` — ${o.reason === 'insufficient_balance' || o.reason === 'no_balance' ? (t(lang, 'badge_sold_out') || 'tükendi') : o.reason}`}`);
       if (o.affordable) {
-        serviceButtons.push([{ text: `#${i + 1} — ${price}$ · ${svcName}`, callback_data: `svc_${productId}_${o.product_supplier_id}` }]);
+        serviceButtons.push([{ text: `#${i + 1} — ${price}$ · ${svcName}${wTag}`, callback_data: `svc_${productId}_${o.product_supplier_id}` }]);
       }
     });
 

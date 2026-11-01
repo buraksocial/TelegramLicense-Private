@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mağaza</title>
+<style>
+:root{--bg:#0e1621;--card:#17212b;--chip:#232e3c;--txt:#eef2f6;--mut:#8a97a5;--acc:#2b9df4;--ok:#3ec07a;--warn:#f6a13c;--bad:#ef5350}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 -apple-system,'Segoe UI',Roboto,sans-serif}
+header{position:sticky;top:0;background:var(--card);display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #0006;z-index:5}
+header .logo{font-weight:700;font-size:17px}header .sp{flex:1}
+.balance{background:var(--chip);padding:6px 12px;border-radius:20px;font-size:13px}
+nav.cats{display:flex;gap:8px;overflow-x:auto;padding:12px 16px 4px}
+.chip{white-space:nowrap;background:var(--card);border:1px solid #ffffff18;color:var(--txt);padding:7px 14px;border-radius:20px;cursor:pointer;font-size:13.5px}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
+main{padding:10px 12px 90px;max-width:920px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-top:8px}
+.card{background:var(--card);border-radius:14px;padding:14px;cursor:pointer;border:1px solid #ffffff10;transition:.15s}
+.card:hover{border-color:var(--acc)}
+.card h3{margin:0 0 6px;font-size:15px;font-weight:600}
+.card .row{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
+.price{color:var(--acc);font-weight:700;font-size:17px}
+.stock{color:var(--mut);font-size:12.5px}
+.badge{font-size:11px;padding:3px 9px;border-radius:12px;background:#ef535022;color:var(--bad);border:1px solid #ef535044}
+.badge.warr{background:#3ec07a22;color:var(--ok);border-color:#3ec07a44}
+button{background:var(--acc);border:0;color:#fff;padding:11px 18px;border-radius:11px;font-size:14.5px;cursor:pointer;font-weight:600}
+button.ghost{background:var(--chip)}button:disabled{opacity:.45;cursor:default}
+.rowbtns{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.svc{display:flex;justify-content:space-between;align-items:center;background:var(--card);padding:12px 14px;border-radius:12px;margin:7px 0;border:1px solid #ffffff12;cursor:pointer}
+.svc.sel{border-color:var(--acc);background:#2b9df412}
+.svc.off{opacity:.5;cursor:default}
+.svc .n{font-size:14px}.svc .p{font-weight:700;color:var(--acc)}
+.desc{background:var(--card);border-radius:12px;padding:12px 14px;white-space:pre-wrap;font-size:13.5px;color:#c8d2dc;margin:8px 0}
+.modal{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+.modal.on{display:flex}.sheet{background:var(--card);border-radius:16px;padding:18px;max-width:440px;width:100%;max-height:86vh;overflow:auto}
+input,select{background:var(--chip);border:1px solid #ffffff22;color:var(--txt);padding:11px;border-radius:10px;font-size:15px;width:100%}
+label{display:block;font-size:12.5px;color:var(--mut);margin:10px 0 4px}
+.order{background:var(--card);border-radius:12px;padding:12px 14px;margin:8px 0;border:1px solid #ffffff12;font-size:13.5px}
+.order .hd{display:flex;justify-content:space-between}.order code{color:var(--ok);word-break:break-all;font-size:12px}
+.st{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--chip)}
+.st.ok{color:var(--ok)}.st.pend{color:var(--warn)}
+.muted{color:var(--mut);font-size:12.5px}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#000d;color:#fff;padding:12px 20px;border-radius:12px;display:none;z-index:50;max-width:90vw}
+a{color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">🛒 <span data-i="app_name">Mağaza</span></div>
+  <div class="sp"></div>
+  <div class="balance" id="balChip" style="display:none"></div>
+  <button class="ghost" id="btnLang" style="padding:6px 10px;font-size:13px">EN/TR</button>
+  <button class="ghost" id="btnOrders" style="padding:6px 10px;font-size:13px" data-i="nav_orders">Siparişlerim</button>
+  <button class="ghost" id="btnOut" style="padding:6px 10px;font-size:13px;display:none" data-i="nav_logout">Çıkış</button>
+</header>
+<nav class="cats" id="cats"></nav>
+<main id="view"></main>
+<div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const state={token:localStorage.getItem('shop_token')||null,lang:localStorage.getItem('shop_lang')||'tr',
+  products:[],categories:[],cat:null,product:null,decision:null,lock:null,me:null};
+const I18N={
+ tr:{app_name:'Mağaza',nav_orders:'Siparişlerim',nav_logout:'Çıkış',login_h:'Giriş yap',
+  login_p:'Devam etmek için Telegram hesabınla giriş yap. Bakiyen, indirimlerin ve siparişlerin botla aynıdır.',
+  login_retry:'🔄 Yenile',login_id:'Telegram ID',login_btn:'Giriş',err_login:'Giriş başarısız',choose_cat:'🗂 Kategori seç',all:'Tümü',
+  sold_out:'🔴 tükendi',reserve:'⏳ Rezerve et',buy:'Satın al',qty:'Adet',pay:'Öde',total:'Toplam',
+  pay_bal:'💳 Bakiye ile öde',pay_bn:'🟡 Binance (TXID)',back:'🔙 Geri',orders_t:'Siparişlerim',
+  no_orders:'Henüz sipariş yok.',delivered:'Teslim edildi',pend:'Bekliyor',bal:'Bakiye',
+  promo_h:'🎁 Promosyon Kodu',promo_ph:'KOD',promo_btn:'Kullan',
+  buy_t:'Satın al',svc:'Hizmetler',best:'⭐ en iyi',stock:'stok',ok:'Sipariş tamam!',
+  copied:'kopyalandı',insufficient:'bakiye yetersiz',lock_expired:'Fiyat süresi doldu, tekrar dene'},
+ en:{app_name:'Store',nav_orders:'My Orders',nav_logout:'Logout',login_h:'Sign in',
+  login_p:'Sign in with your Telegram account to continue. Balance, discounts and orders are shared with the bot.',
+  login_retry:'🔄 Reload',login_id:'Telegram ID',login_btn:'Sign in',err_login:'Login failed',choose_cat:'🗂 Choose category',all:'All',
+  sold_out:'🔴 sold out',reserve:'⏳ Reserve',buy:'Buy',qty:'Quantity',pay:'Pay',total:'Total',
+  pay_bal:'💳 Pay with balance',pay_bn:'🟡 Binance (TXID)',back:'🔙 Back',orders_t:'My orders',
+  no_orders:'No orders yet.',delivered:'Delivered',pend:'Pending',bal:'Balance',
+  promo_h:'🎁 Promo Code',promo_ph:'CODE',promo_btn:'Redeem',
+  buy_t:'Purchase',svc:'Services',best:'⭐ best',stock:'stock',ok:'Order complete!',
+  copied:'copied',insufficient:'insufficient balance',lock_expired:'Price expired, try again'}};
+const t=k=>(I18N[state.lang]||I18N.tr)[k]||k;
+
+async function api(path,opts={}){
+  opts.headers=Object.assign({'Content-Type':'application/json','x-lang':state.lang},opts.headers||{});
+  if(state.token)opts.headers.Authorization='Bearer '+state.token;
+  const r=await fetch('/api/'+path,opts);
+  const j=await r.json().catch(()=>({error:'network'}));
+  if(!r.ok){const e=new Error(j.error||('http '+r.status));e.status=r.status;e.code=j.code;throw e;}
+  return j;
+}
+function toast(m){const el=$('#toast');el.textContent=m;el.style.display='block';setTimeout(()=>el.style.display='none',3200)}
+function money(n){return Number(n||0).toFixed(2)+'$'}
+
+async function loadShell(){
+  try{const cfg=await api('config');state.categories=cfg.categories||[];state.botUsername=cfg.bot_username||null;}catch(e){}
+  if(!state.token){renderLogin();return}
+  try{state.me=await api('me');}catch(e){if(e.status===401){state.token=null;localStorage.removeItem('shop_token');renderLogin();return}}
+  $('#balChip').style.display='block';$('#balChip').textContent=t('bal')+': '+money(state.me.balance);
+  $('#btnOut').style.display='inline-block';
+  const prods=await api('products');
+  state.products=prods.products||[];
+  renderCats();renderProducts();
+}
+function renderLogin(){
+  const botU = state.botUsername || null;
+  $('#view').innerHTML=`<div class="sheet" style="max-width:420px;margin:8vh auto"><h2>${t('login_h')}</h2><p class="muted">${t('login_p')}</p>
+  ${botU?`<script async src="https://telegram.org/js/telegram-widget.js?22" data-telegram-login="${botU}" data-size="large" data-onauth="onTelegramAuth(user)" data-request-access="write"></script>`:'<p class="muted">⚠️ Bot kullanıcı adı alınamadı — widget yüklenemedi.</p>'}
+  <div style="margin-top:14px"><button class="ghost" onclick="location.reload()">${t('login_retry')}</button></div></div>`;
+}
+window.onTelegramAuth=async(user)=>{
+  try{const r=await api('login',{method:'POST',body:JSON.stringify(user)});
+    state.token=r.token;localStorage.setItem('shop_token',r.token);loadShell();
+  }catch(e){toast(t('err_login')+': '+e.message)}
+};
+
+function renderCats(){
+  const c=$('#cats');c.innerHTML='';
+  const mk=(label,cat,on)=>{const b=document.createElement('div');b.className='chip'+(on?' on':'');b.textContent=label;b.onclick=()=>{state.cat=cat;renderCats();renderProducts()};return b};
+  c.appendChild(mk(t('all'),null,state.cat===null));
+  for(const cat of state.categories)c.appendChild(mk((cat.emoji||'📂')+' '+cat.name,cat.id,state.cat===cat.id));
+}
+function visibleProducts(){
+  if(state.cat===null)return state.products;
+  const cat=state.categories.find(c=>c.id===state.cat);
+  const ids=new Set((cat&&cat.product_ids)||[]);
+  return state.products.filter(p=>ids.has(p.id));
+}
+function renderProducts(){
+  const list=visibleProducts();
+  $('#view').innerHTML='<div class="grid">'+list.map(p=>{
+    const badge=p.sold_out?`<span class="badge">${t('sold_out')}</span>`:
+      (p.warranty==='guaranteed'?`<span class="badge warr">🛡</span>`:'');
+    return `<div class="card" data-id="${p.id}"><h3>${esc(p.name)}</h3>
+    <div class="row"><span class="price">${money(p.price)}</span><span>${badge}</span></div>
+    <div class="stock">${t('stock')}: ${p.stock}</div></div>`}).join('')+'</div>';
+  document.querySelectorAll('.card').forEach(c=>c.onclick=()=>openProduct(+c.dataset.id));
+}
+function esc(s){return String(s||'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+
+async function openProduct(id){
+  $('#view').innerHTML='<p class="muted">…</p>';
+  let d;try{d=await api('product/'+id)}catch(e){toast(e.message);return loadShell()}
+  state.product=d;state.decision=null;state.lock=null;
+  const p=d.product,s=d.summary;
+  let svcHtml='';
+  if(d.services&&d.services.length){
+    svcHtml=`<h4 style="margin:14px 0 4px">${t('svc')}</h4>`+d.services.map(sv=>{
+      const off=!sv.affordable;
+      return `<div class="svc${off?' off':''}${sv.best?' sel':''}" data-ps="${sv.ps_id||''}" data-best="${sv.best?1:0}">
+      <span class="n">#${sv.index} ${esc(sv.name)} ${sv.best?'⭐':''}${sv.warranty==='guaranteed'?' 🛡':sv.warranty==='instant'?' ⚡':''}</span>
+      <span class="p">${off?('— '+(t('sold_out'))):money(sv.price)+(sv.stock!=null?` <small class="muted">(${t('stock')} ${sv.stock})</small>`:'')}</span></div>`}).join('');
+  }
+  const buyPrice=s.price;
+  $('#view').innerHTML=`<button class="ghost" id="bBack">${t('back')}</button>
+  <h2 style="margin:12px 0 4px">${esc(p.name)} ${p.warranty==='guaranteed'?'🛡':''}</h2>
+  <div class="price" style="font-size:22px">${money(buyPrice)} ${s.sold_out?`<span class="badge">${t('sold_out')}</span>`:''}</div>
+  ${p.description?`<div class="desc">${esc(p.description)}</div>`:''}${svcHtml}
+  <div class="rowbtns"><button id="bBuy" ${''}>${s.sold_out?t('reserve'):t('buy')}</button></div>`;
+  $('#bBack').onclick=loadShell;
+  let sel=d.services?d.services.find(x=>x.best)||d.services.find(x=>x.affordable):null;
+  document.querySelectorAll('.svc:not(.off)').forEach(el=>el.onclick=()=>{
+    document.querySelectorAll('.svc').forEach(x=>x.classList.remove('sel'));
+    el.classList.add('sel');
+    sel={ps_id:+el.dataset.ps||null,best:el.dataset.best==='1',price:parseFloat(el.querySelector('.p').textContent)};
+    const pr=el.querySelector('.p').textContent.match(/([\d.]+)\$/);
+    if(pr){$('#bBuy').closest('main').querySelector('.price').innerHTML=el.querySelector('.p').textContent.split('<')[0];}
+    state.decision=sel;});
+  $('#bBuy').onclick=()=>openCheckout(sel);
+}
+
+async function openCheckout(sel){
+  const d=state.product;const s=d.summary;
+  let unit=s.price,lock=null;
+  if(sel){ // dynamic service chosen -> lock it
+    try{const r=await api('lock',{method:'POST',body:JSON.stringify({product_id:d.product.id,ps_id:sel.ps_id||undefined,best:!!sel.best})});
+      lock=r.token;unit=r.unit;}catch(e){toast(e.message);return}}
+  const sheet=$('#sheet');
+  sheet.innerHTML=`<h3>${t('buy_t')}: ${esc(d.product.name)}</h3>
+  <div class="muted">${t('svc')}: $${Number(unit).toFixed(2)}</div>
+  <label>${t('qty')}</label><input id="inQty" type="number" min="1" value="1">
+  <div class="muted" style="margin-top:8px">${t('total')}: <b id="tt">${money(unit)}</b></div>
+  <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+    ${[1,5,10,20,50,100].map(q=>`<button class="ghost qb" data-q="${q}" style="padding:8px 12px">${q}</button>`).join('')}</div>
+  <div class="rowbtns" style="margin-top:14px">
+    ${s.sold_out?`<label style="display:flex;align-items:center;gap:8px;width:100%;font-size:14px"><input type="checkbox" id="bBuyReserveOn" style="width:auto" checked> ${t('reserve')}</label>`:''}
+    <button id="payBal" ${state.me&&state.me.balance<unit?'disabled':''}>${t('pay_bal')} (${money(state.me?state.me.balance:0)})</button>
+    <button class="ghost" id="payBn">${t('pay_bn')}</button>
+    <button class="ghost" id="cancel">❌</button>
+  </div><div id="bnBox" style="display:none"><label>TXID</label><input id="inTx" placeholder="işlem hash/id"><button id="bnGo" style="margin-top:8px">${t('pay')}</button></div>`;
+  $('#modal').classList.add('on');
+  const qtyEl=$('#inQty');
+  const upd=()=>{$('#tt').textContent=money(Number(qtyEl.value||1)*unit);
+    $('#payBal').disabled=state.me.balance<Number(qtyEl.value||1)*unit};
+  qtyEl.oninput=upd;document.querySelectorAll('.qb').forEach(b=>b.onclick=()=>{qtyEl.value=b.dataset.q;upd()});upd();
+  $('#cancel').onclick=closeModal;
+  const pay=async(pmethod,extra)=>{
+    const qty=Math.max(1,parseInt(qtyEl.value,10));
+    const idem='w'+Date.now()+Math.random().toString(36).slice(2);
+    const reserve=!!$('#bBuyReserveOn');
+    try{
+      const r=await api('checkout',{method:'POST',headers:{'idempotency-key':idem},
+        body:JSON.stringify(Object.assign({product_id:d.product.id,qty,lock_token:lock,pay:pmethod,reserve},extra||{}))});
+      closeModal();renderDelivered(r);
+      state.me.balance=await api('me').then(m=>m.balance);$('#balChip').textContent=t('bal')+': '+money(state.me.balance);
+    }catch(e){toast(e.message)}
+  };
+  $('#payBal').onclick=()=>pay('balance');
+  $('#payBn').onclick=()=>{$('#bnBox').style.display='block'};
+  $('#bnGo').onclick=()=>{const tx=$('#inTx').value.trim();if(!tx)return toast('TXID gir');pay('binance',{txid:tx})};
+}
+function closeModal(){$('#modal').classList.remove('on')}
+function renderDelivered(r){
+  const items=(r.delivered||[]).map(x=>`<div class="order"><code>${esc(x)}</code></div>`).join('');
+  $('#view').innerHTML=`<h2>✅ ${t('ok')}</h2><div class="muted">${r.qty} × — ${money(r.paid)}</div>
+  ${r.kind==='reservation'?`<div class="order">${t('pend')}</div>`:items}
+  <div class="rowbtns"><button class="ghost" onclick="loadShell()">${t('back')}</button></div>`;
+}
+
+async function renderOrders(){
+  $('#view').innerHTML='<p class="muted">…</p>';
+  const d=await api('orders');
+  const os=d.orders.map(o=>`<div class="order"><div class="hd"><b>${esc(o.product)}</b><span class="st ok">${o.status==='delivered'?t('delivered'):o.status}</span></div>
+   <div class="muted">#${o.id} · ${o.qty} × · ${money(o.paid)} · ${o.date||''}</div>
+   ${(o.delivered||[]).map(x=>`<div><code>${esc(x)}</code></div>`).join('')}</div>`).join('');
+  const rs=d.reservations.map(o=>`<div class="order"><div class="hd"><b>${esc(o.product)}</b><span class="st pend">${t('pend')} ${o.fulfilled}/${o.qty}</span></div>
+   <div class="muted">#${o.id} · ${o.qty} × · ${money(o.paid)}</div></div>`).join('');
+  $('#view').innerHTML=`<h2>${t('orders_t')}</h2>${os}${rs}${(!os&&!rs)?`<p class="muted">${t('no_orders')}</p>`:''}
+  <div class="sheet" style="margin-top:16px"><h3>${t('promo_h')}</h3>
+   <div style="display:flex;gap:8px"><input id="inPromo" placeholder="${t('promo_ph')}" style="flex:1"><button id="btnPromo" style="width:auto">${t('promo_btn')}</button></div>
+   <p class="muted" id="promoMsg" style="margin-top:8px"></p></div>
+  <div class="rowbtns"><button class="ghost" onclick="loadShell()">${t('back')}</button></div>`;
+  $('#btnPromo').onclick=async()=>{
+    const code=$('#inPromo').value.trim(); if(!code)return;
+    try{const r=await api('promo',{method:'POST',body:JSON.stringify({code})});
+      $('#promoMsg').textContent=r.message;
+      if(r.ok){state.me.balance=r.balance;$('#balChip').textContent=t('bal')+': '+money(r.balance);}
+    }catch(e){$('#promoMsg').textContent=e.message}
+  };
+}
+$('#btnOrders').onclick=renderOrders;
+$('#btnOut').onclick=async()=>{try{await api('logout',{method:'POST'})}catch(e){};localStorage.removeItem('shop_token');state.token=null;renderLogin()};
+$('#btnLang').onclick=()=>{state.lang=state.lang==='tr'?'en':'tr';localStorage.setItem('shop_lang',state.lang);$('#btnLang').textContent=state.lang==='tr'?'EN/TR':'TR/EN';loadShell()};
+loadShell();
+</script>
+</body>
+</html>

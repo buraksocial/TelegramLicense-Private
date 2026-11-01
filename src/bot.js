@@ -17,6 +17,9 @@ initDb();
 const https = require('https');
 const agent = new https.Agent({ family: 4, keepAlive: true });
 const bot = new Telegraf(BOT_TOKEN, { telegram: { agent } });
+// Lightweight registry so services/web can message via Telegram WITHOUT a
+// circular require (requiring this file from a child would re-boot the bot).
+global.__LICENSE_BOT = bot;
 
 // Global Middlewares
 bot.use((ctx, next) => {
@@ -46,6 +49,10 @@ MarginWatchdog.start(bot);
 
 const TranslationService = require('./services/TranslationService');
 TranslationService.start(bot);
+
+// Web mağaza (bot ile aynı DB/fiyat/teslim mantığı — CheckoutService)
+try { require('../web/server').startWebServer(); }
+catch (e) { console.error('[Web] başlatılamadı:', e.message); }
 
 const userBotManager = require('./services/UserBotManager');
 userBotManager.init().catch(err => console.error('UserBot init error:', err));

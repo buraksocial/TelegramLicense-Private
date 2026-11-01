@@ -47,6 +47,10 @@ module.exports = {
   LLM_API_KEY: process.env.LLM_API_KEY,
   LLM_MODEL: process.env.LLM_MODEL || 'gpt-6.1-sol',
 
+  // ---- Web store ----
+  WEB_ENABLED: ['1', 'true', 'yes'].includes(String(process.env.WEB_ENABLED || '1').toLowerCase()),
+  WEB_PORT: parseInt(process.env.WEB_PORT, 10) || 3000,
+
   // ---- Safety switch: when truthy, no write order is ever sent to a supplier ----
   SUPPLIER_DRY_RUN: ['1', 'true', 'yes'].includes(String(process.env.SUPPLIER_DRY_RUN || '').toLowerCase())
 };

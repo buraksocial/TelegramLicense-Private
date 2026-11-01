@@ -73,3 +73,46 @@ Migrasyonlar geri alınmaz ama **ekleyicidir**: eski kod yeni DB ile çalışmay
 ## DRY_RUN'dan canlıya
 `.env` → `SUPPLIER_DRY_RUN=1` satırını sil/kapat, `pm2 restart`. İlk siparişte
 supplier sipariş ekranından external order id ile doğrula.
+
+## Web mağazası (bot ile aynı süreçte)
+Bot açılışta `web/server.js`'i `WEB_PORT` (varsayılan 3000) üzerinde başlatır.
+`WEB_ENABLED=0` ile kapatılabilir. Yeni npm paketi **yok** — dümdüz `node:http`.
+
+Giriş **yalnızca Telegram Login Widget** ile olur (imza HMAC doğrulaması; sahte
+ID ile giriş mümkün değil). Widget'ın çalışması için iki şart:
+
+1. **BotFather → `/setdomain`** (veya "Bot Settings → Menu Button") ile site
+   alan adını bağla; widget `data-telegram-login` alan adı bunu kullanır.
+2. Sayfa **HTTPS** sunulmalı (widget localhost'ta localhost'a izin verir ama
+   gerçek kullanıcı için şart). Nginx reverse proxy örneği:
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name magaza.alanadiniz.com;          # BotFather'da kayıtlı alan adı
+  ssl_certificate     /etc/letsencrypt/live/magaza.alanadiniz.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/magaza.alanadiniz.com/privkey.pem;
+
+  location / {
+    proxy_pass http://127.0.0.1:3000;          # WEB_PORT
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+```
+
+Notlar:
+- Web oturumları bellekte (restart'te düşer; kullanıcı widget ile tekrar girer).
+- Fiyat/indirim/teslim mantığı bot ile **aynı kod** (`CheckoutService`) — fiyat
+  farklılığı gösterilemez.
+- Rezervasyon: tükendi üründe "⏳ Rezerve" kutucuğu ile; bot ile aynı kurallar.
+- Misafirler katalogu baz fiyatla gezer; sipariş için giriş şart.
+
+## Garanti sınıfları (warranty)
+- `products.warranty`: `none` (klasik, filtre yok — canlıdaki tüm eski ürünler),
+  `guaranteed` (yalnız garantili servislerden teslim), `instant` (garantili
+  stoktan **asla** teslim etmez; unknown kabul eder).
+- Servis sınıfı katalog adına göre otomatik sınıflandırılır (`utils/warranty.js`
+  regex: warranty/garantie→🛡, instant/no warranty→⚡); admin link detayından
+  override edebilir (auto→guaranteed→instant→mixed döngüsü).
+- Uyumsuz teklifler müşteri listesinde hiç görünmez, fallback kuyruğuna girmez.
