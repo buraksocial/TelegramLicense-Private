@@ -30,11 +30,22 @@ bot.use(checkMembership);       // Zorunlu Kanal/Grup aboneliği kontrolü
 // Başlat ReservationManager
 const ReservationManager = require('./services/ReservationManager');
 const reservationManager = new ReservationManager(bot);
-reservationManager.start(1500); // 1.5 saniyede bir kontrol et
+reservationManager.start(10000); // snapshot tabanlı; governor'a dokunmaz
 
 const StockWatcher = require('./services/StockWatcher');
 const stockWatcher = new StockWatcher(bot);
-stockWatcher.start(1500); // Poll API every 1.5s
+stockWatcher.start(20000); // katalog snapshot'ını diff'ler, API'ye istek atmaz
+
+// Tek merkezli katalog tazeleyici (her tedarikçi kendi hız limitinde)
+const CatalogPoller = require('./services/CatalogPoller');
+CatalogPoller.start();
+
+// Kâr/dengeye admin izleme + çeviri ajanı
+const MarginWatchdog = require('./services/MarginWatchdog');
+MarginWatchdog.start(bot);
+
+const TranslationService = require('./services/TranslationService');
+TranslationService.start(bot);
 
 const userBotManager = require('./services/UserBotManager');
 userBotManager.init().catch(err => console.error('UserBot init error:', err));
