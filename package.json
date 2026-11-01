@@ -4,7 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/bot.js",
+    "backup": "node scripts/backup_db.js",
+    "smoke": "node scripts/smoke_suppliers.js",
+    "audit:money": "node scripts/audit_money.js",
+    "test:pricing": "node scripts/test_pricing.js",
+    "test:matcher": "node scripts/test_matcher.js",
+    "test:checkout": "SUPPLIER_DRY_RUN=1 node scripts/test_dry_checkout.js",
+    "test": "node scripts/test_money.js && node scripts/test_pricing.js && node scripts/test_matcher.js"
   },
   "keywords": [],
   "author": "",
