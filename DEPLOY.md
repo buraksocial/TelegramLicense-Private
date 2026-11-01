@@ -116,3 +116,76 @@ Notlar:
   regex: warranty/garantie→🛡, instant/no warranty→⚡); admin link detayından
   override edebilir (auto→guaranteed→instant→mixed döngüsü).
 - Uyumsuz teklifler müşteri listesinde hiç görünmez, fallback kuyruğuna girmez.
+
+## Public REST API — bot-api.developer.org.tr
+`api/server.js` bağımsız bir `node:http` sunucusudur; bot ile **aynı beyin**
+(CheckoutService/PricingEngine/RateGovernor) ama ayrı port: `API_PORT`
+(varsayılan **3100**), `API_ENABLED=0` ile kapatılır. CORS: `API_CORS_ORIGIN`
+(`*` veya alan adı listesi).
+
+- Doküman & deneme konsolu: `https://bot-api.../v1/docs` + `/v1/openapi.json` (public).
+- Kimlik: admin panelinden (🔑 API Anahtarları) üretilen `sk-…` anahtarları;
+  scope (`read`/`orders`/`wallet`), anahtar başına rpm + günlük kota, bağlanan
+  kullanıcı hesabı (siparişler o hesabın bakiye/indiriminden yürür), opsiyonel
+  webhook (HMAC-SHA256 imzalı `order.created`).
+- Rate limit katmanları: per-IP flood bucket (`API_IP_RPM`, varsayılan 600) +
+  per-key token bucket (ağırlıklı maliyet: katalog okuma 1, sipariş 8) + UTC
+  günlük kota. Yanıtlarda `X-RateLimit-*` / `Retry-After`.
+- Sipariş POST **Idempotency-Key zorunlu** (24 saat replay → aynı sipariş).
+- Nginx (Linux):
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name bot-api.alanadiniz.com;
+  ssl_certificate     /etc/letsencrypt/live/bot-api.alanadiniz.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/bot-api.alanadiniz.com/privkey.pem;
+
+  location / {
+    proxy_pass http://127.0.0.1:3100;           # API_PORT
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;   # per-IP limit doğru olsun diye
+  }
+}
+```
+
+Windows VDS kurulumunun tamamı (nginx GUI yöneticisi, NSSM/pm2, win-acme,
+IPN, yedekleme): **DEPLOY-WINDOWS.md**.
+
+## Binance Pay otomatik yükleme
+Müşterinin yapıştırdığı numara `GET /sapi/v1/pay/transactions` geçmişinde
+(orderId eşleşmesi) aranır; henüz sonuçlanmamışsa `pending_topups` kuyruğuna
+gider ve DepositPoller (3 dk) Binance onayladığı anda **tam bir kez** bakiyeye
+yazar (txid UNIQUE + transactions dedup). Kismî ama doğrulanmış ödeme anında
+bakiyeye geçer. Bekleyenleri admin paneli 📊 Panel kartında gör.
+
+## Çok ağlı kripto yatırma (kişiye özel cüzdan)
+USDT·BEP20 / USDT·Polygon / USDT·TRC20 / TON (memo'lu) / USDT·TON / LTC —
+adresi ve ödeme algılamasını bir **agregatör** verir (kendi node'unu
+çalıştırmadan). Anahtar tanımlanana kadar özellik bot+web'de görünmez:
+
+```ini
+# .env — birini seç
+DEPOSIT_PROVIDER=coinpayments
+COINPAYMENTS_MERCHANT_ID=...
+COINPAYMENTS_API_KEY=...
+COINPAYMENTS_API_SECRET=...
+COINPAYMENTS_IPN_SECRET=...     # hesap panelinde IPN secret ile AYNI olmalı
+# veya
+DEPOSIT_PROVIDER=nowpayments
+NOWPAYMENTS_API_KEY=...
+NOWPAYMENTS_IPN_SECRET=...
+
+DEPOSIT_NETWORKS=usdt_bep20,usdt_polygon,ton,usdt_ton,ltc,usdt_trc20   # opsiyonel filtre
+WEB_PUBLIC_URL=https://bot.developer.org.tr   # NOWPayments ipn_callback_url buradan üretilir
+```
+
+- CoinPayments: kalıcı kişiye özel adres (`create_deposit_address`, label=u<id>);
+  IPN'i hesap panelinde `https://bot.../ipn/coinpayments` olarak kur
+  (form-urlencoded, `X-CoinPay-Signature: HMAC-SHA1`).
+- NOWPayments: ödeme başına benzersiz adresli invoice; webhook
+  `https://bot.../ipn/nowpayments` (JSON, `x-nowpayments-sig: HMAC-SHA256`) +
+  15 dk'lık polling sweep yedek rail.
+- Kredi tek noktadan: `deposit_events UNIQUE(provider,ref)` → çift ödeme imkânsız;
+  tutar USD'ye normalize edilip bakiyeye yazılır, kullanıcı+admin bildirilir.
+- Admin paneli 🌐 Kripto Yatırma sekmesi: cüzdanlar + provider olayları.
