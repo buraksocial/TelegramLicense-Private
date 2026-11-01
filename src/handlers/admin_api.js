@@ -11,6 +11,10 @@ function setupAdminApiHandlers(bot, adminMiddleware) {
       reply_markup: {
         inline_keyboard: [
           [{ text: '🏢 Tedarikçi (Supplier) Yönetimi', callback_data: 'admin_supplier_menu' }],
+          [{ text: '🔗 Eşleşme Onayı (katalog→ürün)', callback_data: 'admin2_matches_1' }],
+          [{ text: '🗂 Kategoriler', callback_data: 'admin2_categories' }],
+          [{ text: '🌐 Diller & Çeviri', callback_data: 'admin2_languages' }],
+          [{ text: '🚨 Uyarılar', callback_data: 'admin2_alerts' }],
           [{ text: '🔗 Ürün Tedarikçi Bağlantıları', callback_data: 'admin_product_suppliers_list_1' }],
           [{ text: '🤖 Otomatik Alımı Düzenle', callback_data: 'admin_api_autobuy_1' }],
           [{ text: '🔙 Geri Dön', callback_data: 'admin_back_main' }]
@@ -26,13 +30,19 @@ function setupAdminApiHandlers(bot, adminMiddleware) {
     
     if (suppliers.length === 0) text += '<i>Hiç tedarikçi yok.</i>\n';
     suppliers.forEach(s => {
-      text += `<b>ID:</b> ${s.id} | <b>İsim:</b> ${s.name} | <b>Tip:</b> ${s.type}\n`;
+      const n = db.prepare('SELECT COUNT(*) c FROM supplier_catalogs WHERE supplier_id = ?').get(s.id).c;
+      text += `<b>ID:</b> ${s.id} | <b>İsim:</b> ${s.name} | <b>Tip:</b> ${s.type}${n ? ` | katalog: ${n}` : ''}\n`;
     });
+
+    const catalogButtons = suppliers
+      .filter(s => db.prepare('SELECT COUNT(*) c FROM supplier_catalogs WHERE supplier_id = ?').get(s.id).c > 0)
+      .map(s => [{ text: `📚 Katalog: ${s.name}`, callback_data: `admin2_catalog_${s.id}_1` }]);
 
     ctx.editMessageText(text, {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
+          ...catalogButtons,
           [{ text: '➕ Yeni Tedarikçi Ekle', callback_data: 'admin_add_supplier' }],
           [{ text: '🔙 Geri', callback_data: 'admin_api_menu' }]
         ]

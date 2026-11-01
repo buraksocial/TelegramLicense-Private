@@ -6,6 +6,7 @@ const axios = require('axios');
 const { t } = require('../utils/i18n');
 const setupAdminApiHandlers = require('./admin_api');
 const SupplierManager = require('../services/SupplierManager');
+const { parseMoney } = require('../utils/money');
 
 function getUserLang(userId) {
   const user = db.prepare('SELECT lang FROM users WHERE id = ?').get(userId);
@@ -65,8 +66,8 @@ function setupAdminHandlers(bot) {
        return ctx.reply(`Kullanıcı ${userId} için özel rezerve ücreti kaldırıldı. Sistem varsayılanı kullanılacak.`);
     }
     
-    const fee = parseFloat(feeStr);
-    if (isNaN(fee) || fee < 0) return ctx.reply('Geçersiz ücret miktarı.');
+    const fee = parseMoney(feeStr);
+    if (fee === null || fee < 0) return ctx.reply('Geçersiz ücret miktarı.');
     
     const res = db.prepare('UPDATE users SET custom_reservation_fee = ? WHERE id = ?').run(fee, userId);
     if (res.changes === 0) return ctx.reply('Kullanıcı bulunamadı!');
@@ -188,7 +189,7 @@ function setupAdminHandlers(bot) {
     }).catch(e => {});
   });
 
-  bot.action(/^admin_product_detail_(\d+)$/, adminMiddleware, (ctx) => {
+  bot.action(/^admin_product_detail_(\d+)$/, adminMiddleware, async (ctx) => {
     const productId = parseInt(ctx.match[1], 10);
     const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
     if (!product) return ctx.answerCbQuery('Ürün bulunamadı!', { show_alert: true });
@@ -201,15 +202,40 @@ function setupAdminHandlers(bot) {
       name = parsed['tr'] || parsed['en'] || name;
     } catch (e) {}
 
-    const text = `📦 <b>Ürün Detayı:</b> ${name}\n\n💵 <b>Satış Fiyatı:</b> ${product.price} USD\n💰 <b>Birim Maliyet:</b> ${product.cost_usd || 0} USD\n🛒 <b>Mevcut Stok:</b> ${stockCount} adet`;
+    // live offers (governor-safe; falls back to snapshot)
+    let pricingBlock = '';
+    let offerButtons = [];
+    try {
+      const { PricingEngine } = require('../services/PricingEngine');
+      const decision = await PricingEngine.price(product, { qty: 1 });
+      const MODE_LABEL = { max_profit: '📈 Maks. Kâr', cheapest: '💸 En Ucuz', manual: '✍️ Manuel' };
+      pricingBlock = `\n\n🧮 <b>Fiyalama modu:</b> ${MODE_LABEL[decision.mode] || decision.mode}` +
+        `  |  <b>Teslimat:</b> ${decision.fulfillment_mode}` +
+        `\n🏷 <b>.varsayılan</b> kâr: %${product.default_margin_percent ?? 150} — alt limit: $${product.default_floor_price || 0}` +
+        (decision.soldOut
+          ? '\n🔴 <b>ŞU AN TÜKENDİ</b> — hiçbir tedarikçi (bakiye/stok) teslim edemiyor.'
+          : `\n👁 Müşteri fiyatı: <b>$${decision.displayUnit}</b>` +
+            (decision.fulfillOffer ? `  |  Kaynak: ${decision.fulfillOffer.supplier_name} ($${decision.fulfillOffer.unitCost})` : ''));
+
+      offerButtons = decision.all.slice(0, 8).map((o) => [{
+        text: `${o.affordable ? '🟢' : '🔴'} ${o.supplier_name} | $${o.unitCost} → $${o.sellUnit} ${o.realStock != null ? `(${o.realStock})` : ''}`,
+        callback_data: `admin_prod_sup_detail_${productId}_${o.product_supplier_id}`
+      }]);
+    } catch (e) {
+      console.error('product pricing detail failed:', e.message);
+    }
+
+    const text = `📦 <b>Ürün Detayı:</b> ${name}\n\n💵 <b>Satış Fiyatı:</b> ${product.price} USD\n💰 <b>Birim Maliyet:</b> ${product.cost_usd || 0} USD\n🛒 <b>Mevcut Stok:</b> ${stockCount} adet${pricingBlock}`;
 
     ctx.editMessageText(text, {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
+          ...offerButtons,
           [{ text: '➕ Stok Ekle', callback_data: `admin_sel_stock_${productId}` }],
           [{ text: '📝 İsmini Düzenle', callback_data: `admin_prod_edit_name_${productId}` }],
           [{ text: '💵 Fiyat/Maliyet Düzenle', callback_data: `admin_prod_edit_price_${productId}` }],
+          [{ text: '🧮 Fiyalama Modu / Kâr / Alt Limit', callback_data: `admin_prod_pricing_${productId}` }],
           [{ text: '🎁 Toplu Alım Kuralları', callback_data: `admin_prod_bulk_${productId}` }],
           [{ text: '📈 Tüm Fiyatlara Zam Yap (%)', callback_data: `admin_prod_increase_${productId}` }],
           [{ text: '🗑 Ürünü Sil', callback_data: `admin_prod_del_confirm_${productId}` }],
@@ -217,6 +243,209 @@ function setupAdminHandlers(bot) {
         ]
       }
     }).catch(e => {});
+  });
+
+  // ---- pricing mode + margin/floor editor ---------------------------------
+  bot.action(/^admin_prod_pricing_(\d+)$/, adminMiddleware, (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+    if (!product) return ctx.answerCbQuery('Ürün bulunamadı!', { show_alert: true });
+
+    const modeBtns = [
+      { text: product.pricing_mode === 'max_profit' ? '✅ ' : '', callback_data: `admin_prod_mode_${productId}_max_profit`, label: '📈 Maks. Kâr (floor dikkate alınır)' },
+      { text: product.pricing_mode === 'cheapest' ? '✅ ' : '', callback_data: `admin_prod_mode_${productId}_cheapest`, label: '💸 En Ucuz (müşteriya düşük teklif)' },
+      { text: product.pricing_mode === 'manual' ? '✅ ' : '', callback_data: `admin_prod_mode_${productId}_manual`, label: '✍️ Manuel (sabit fiyat)' }
+    ].map((b) => [{ text: `${b.text}${b.label}`, callback_data: b.callback_data }]);
+
+    const fmodeBtns = [
+      ['cheapest', 'Teslimat: en ucuz tedarikçiden'],
+      ['priority', 'Teslimat: öncelik sırasına göre'],
+      ['optimal', 'Teslimat: toplu/optimal bölünme']
+    ].map(([m, label]) => [{
+      text: `${product.supplier_selection_mode === m || (!product.supplier_selection_mode && m === 'cheapest') ? '✅ ' : ''}${label}`,
+      callback_data: `admin_prod_fmode_${productId}_${m}`
+    }]);
+
+    ctx.editMessageText(
+      `🧮 <b>Fiyalama & Kâr — Ürün #${productId}</b>\n\n` +
+      `Mevcut mod: <b>${product.pricing_mode || 'max_profit'}</b>\n` +
+      `Teslimat: <b>${product.supplier_selection_mode || 'cheapest'}</b>\n` +
+      `Varsayılan kâr: <b>%${product.default_margin_percent ?? 150}</b>\n` +
+      `Alt limit: <b>$${product.default_floor_price || 0}</b>\n\n` +
+      `<i>Alt limit: 0.60$'a aldığın ürünü en fazla 3.00$'ın altına düşürmez.\n` +
+      `Teslimat "en ucuz" iken müşteri pahalı tekliften ödediyse fark senin kârın kalır.</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            ...modeBtns,
+            ...fmodeBtns,
+            [{ text: `🎯 Varsayılan kâr %${product.default_margin_percent ?? 150} değiştir`, callback_data: `admin_prod_margin_${productId}` }],
+            [{ text: `⬇️ Alt limit $${product.default_floor_price || 0} değiştir`, callback_data: `admin_prod_floor_${productId}` }],
+            [{ text: '🔙 Ürüne Dön', callback_data: `admin_product_detail_${productId}` }]
+          ]
+        }
+      }
+    ).catch(e => {});
+  });
+
+  bot.action(/^admin_prod_mode_(\d+)_(max_profit|cheapest|manual)$/, adminMiddleware, async (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    db.prepare('UPDATE products SET pricing_mode = ? WHERE id = ?').run(ctx.match[2], productId);
+    ctx.answerCbQuery('Güncellendi').catch(() => {});
+    // re-open pricing screen (regex below handles the render)
+    return openPricingScreen(ctx, productId);
+  });
+
+  bot.action(/^admin_prod_fmode_(\d+)_(cheapest|priority|optimal)$/, adminMiddleware, async (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    db.prepare('UPDATE products SET supplier_selection_mode = ? WHERE id = ?').run(ctx.match[2], productId);
+    ctx.answerCbQuery('Güncellendi').catch(() => {});
+    return openPricingScreen(ctx, productId);
+  });
+
+  async function openPricingScreen(ctx, productId) {
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+    if (!product) return ctx.editMessageText('Ürün bulunamadı.').catch(() => {});
+    const MODE_LABEL = { max_profit: '📈 Maks. Kâr', cheapest: '💸 En Ucuz', manual: '✍️ Manuel' };
+    const sel = product.supplier_selection_mode || 'cheapest';
+    ctx.editMessageText(
+      `🧮 <b>Fiyalama & Kâr — Ürün #${productId}</b>\n\n` +
+      `Mevcut mod: <b>${MODE_LABEL[product.pricing_mode] || product.pricing_mode}</b>\n` +
+      `Teslimat: <b>${sel}</b>\n` +
+      `Varsayılan kâr: <b>%${product.default_margin_percent ?? 150}</b>\n` +
+      `Alt limit: <b>$${product.default_floor_price || 0}</b>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📈 Maks. Kâr', callback_data: `admin_prod_mode_${productId}_max_profit` }],
+            [{ text: '💸 En Ucuz', callback_data: `admin_prod_mode_${productId}_cheapest` }],
+            [{ text: '✍️ Manuel', callback_data: `admin_prod_mode_${productId}_manual` }],
+            [{ text: '🏭 Teslimat: en ucuz', callback_data: `admin_prod_fmode_${productId}_cheapest` }],
+            [{ text: '🏭 Teslimat: öncelik', callback_data: `admin_prod_fmode_${productId}_priority` }],
+            [{ text: '🏭 Teslimat: optimal', callback_data: `admin_prod_fmode_${productId}_optimal` }],
+            [{ text: `🎯 Kâr %${product.default_margin_percent ?? 150} değiştir`, callback_data: `admin_prod_margin_${productId}` }],
+            [{ text: `⬇️ Alt limit $${product.default_floor_price || 0} değiştir`, callback_data: `admin_prod_floor_${productId}` }],
+            [{ text: '🔙 Ürüne Dön', callback_data: `admin_product_detail_${productId}` }]
+          ]
+        }
+      }
+    ).catch(() => {});
+  }
+
+  bot.action(/^admin_prod_margin_(\d+)$/, adminMiddleware, (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    ctx.session = ctx.session || {};
+    ctx.session.adminState = `waiting_product_margin_${productId}`;
+    ctx.editMessageText('🎯 Yeni <b>kâr yüzdesini</b> girin (Örn: 150 → maliyetin 2.5 katı satılır):', {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: `admin_product_detail_${productId}` }]] }
+    }).catch(() => {});
+  });
+
+  bot.action(/^admin_prod_floor_(\d+)$/, adminMiddleware, (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    ctx.session = ctx.session || {};
+    ctx.session.adminState = `waiting_product_floor_${productId}`;
+    ctx.editMessageText('⬇️ <b>Alt limit fiyatı (USD)</b> girin (0 = yok). Örn: 3 → hiçbir teklif 3$ altına satılmaz:', {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: `admin_product_detail_${productId}` }]] }
+    }).catch(() => {});
+  });
+
+  // ---- per-offer (product_suppliers) editor -------------------------------
+  bot.action(/^admin_prod_sup_detail_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    const psId = parseInt(ctx.match[2], 10);
+    const link = db.prepare(
+      `SELECT ps.*, s.name AS supplier_name, s.enabled AS supplier_enabled, s.type
+       FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id WHERE ps.id = ?`
+    ).get(psId);
+    if (!link) return ctx.answerCbQuery('Bağlantı bulunamadı.', { show_alert: true });
+
+    const effMargin = link.margin_percent ?? '(ürün varsayılanı)';
+    const effFloor = link.floor_price ?? '(ürün varsayılanı)';
+    const text =
+      `🏭 <b>${link.supplier_name}</b> (${link.type})\nService: <code>${link.remote_service_id}</code>\n\n` +
+      `Son bilinen maliyet: <b>${link.last_price_usd != null ? `$${link.last_price_usd}` : '?'}</b>` +
+      ` | Stok: <b>${link.last_stock != null ? link.last_stock : '?'}</b>\n` +
+      `Bğ.kâr: <b>${link.margin_percent != null ? `%${link.margin_percent}` : 'varsayılan'}</b>` +
+      ` | Bğ.alt limit: <b>${link.floor_price != null ? `$${link.floor_price}` : 'varsayılan'}</b>\n` +
+      `Eğitim: ${effMargin} / ${effFloor}\n` +
+      `Durum: ${link.enabled ? '🟢 aktif' : '🔴 pasif'} (tedarikçi: ${link.supplier_enabled ? '🟢' : '🔴'})` +
+      (link.note ? `\nNot: ${link.note}` : '');
+
+    ctx.editMessageText(text, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🎯 Bu tedarikçi için kâr %', callback_data: `admin_link_margin_${productId}_${psId}` }],
+          [{ text: '⬇️ Bu tedarikçi için alt limit', callback_data: `admin_link_floor_${productId}_${psId}` }],
+          [{ text: link.enabled ? '🔴 Pasife al' : '🟢 Aktife al', callback_data: `admin_link_toggle_${productId}_${psId}` }],
+          [{ text: '↕️ Önceliği değiştir', callback_data: `admin_link_priority_${productId}_${psId}` }],
+          [{ text: '🗑 Bağlantıyı sil', callback_data: `admin_link_del_${productId}_${psId}` }],
+          [{ text: '🔙 Ürüne Dön', callback_data: `admin_product_detail_${productId}` }]
+        ]
+      }
+    }).catch(() => {});
+  });
+
+  bot.action(/^admin_link_toggle_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
+    const [, productId, psId] = ctx.match.map(Number);
+    db.prepare('UPDATE product_suppliers SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id = ?').run(psId);
+    ctx.answerCbQuery('Durum değişti.').catch(() => {});
+    return bot.handleUpdate({
+      update_id: ctx.update.update_id,
+      callback_query: { ...ctx.callbackQuery, data: `admin_prod_sup_detail_${productId}_${psId}` }
+    });
+  });
+
+  bot.action(/^admin_link_priority_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
+    const [, productId, psId] = ctx.match.map(Number);
+    const link = db.prepare('SELECT * FROM product_suppliers WHERE id = ?').get(psId);
+    const next = db.prepare('SELECT COALESCE(MAX(priority),0)+1 m FROM product_suppliers WHERE product_id = ?').get(productId).m;
+    db.prepare('UPDATE product_suppliers SET priority = ? WHERE id = ?').run(link.priority >= next ? 1 : link.priority + 1, psId);
+    ctx.answerCbQuery('Öncelik değişti.').catch(() => {});
+    return bot.handleUpdate({
+      update_id: ctx.update.update_id,
+      callback_query: { ...ctx.callbackQuery, data: `admin_prod_sup_detail_${productId}_${psId}` }
+    });
+  });
+
+  bot.action(/^admin_link_del_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
+    const [, productId, psId] = ctx.match.map(Number);
+    const link = db.prepare('SELECT * FROM product_suppliers WHERE id = ?').get(psId);
+    db.prepare('DELETE FROM product_suppliers WHERE id = ?').run(psId);
+    if (link) {
+      db.prepare("UPDATE product_matches SET status='rejected', updated_at=CURRENT_TIMESTAMP WHERE supplier_id = ? AND remote_service_id = ?")
+        .run(link.supplier_id, link.remote_service_id);
+    }
+    ctx.answerCbQuery('Bağlantı silindi.').catch(() => {});
+    return bot.handleUpdate({
+      update_id: ctx.update.update_id,
+      callback_query: { ...ctx.callbackQuery, data: `admin_product_detail_${productId}` }
+    });
+  });
+
+  bot.action(/^admin_link_margin_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
+    const [, productId, psId] = ctx.match.map(Number);
+    ctx.session = ctx.session || {};
+    ctx.session.adminState = `waiting_link_margin_${productId}_${psId}`;
+    ctx.editMessageText('🎯 Bu bağlantı için <b>kâr yüzdesi</b> girin (boş = ürün varsayılanına dön, "clear" yazın):', {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: `admin_prod_sup_detail_${productId}_${psId}` }]] }
+    }).catch(() => {});
+  });
+
+  bot.action(/^admin_link_floor_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
+    const [, productId, psId] = ctx.match.map(Number);
+    ctx.session = ctx.session || {};
+    ctx.session.adminState = `waiting_link_floor_${productId}_${psId}`;
+    ctx.editMessageText('⬇️ Bu bağlantı için <b>alt limit (USD)</b> girin ("clear" = ürün varsayılanı):', {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: `admin_prod_sup_detail_${productId}_${psId}` }]] }
+    }).catch(() => {});
   });
 
   bot.action(/^admin_prod_increase_(\d+)$/, adminMiddleware, (ctx) => {
@@ -385,6 +614,7 @@ function setupAdminHandlers(bot) {
 
   // API menu handlers are in admin_api.js
   setupAdminApiHandlers(bot, adminMiddleware);
+  require('./admin_suppliers2')(bot, adminMiddleware);
 
   bot.action(/^admin_api_autobuy(?:_(\d+))?$/, adminMiddleware, (ctx) => {
     const page = parseInt(ctx.match[1] || '1', 10);
@@ -498,7 +728,7 @@ function setupAdminHandlers(bot) {
     const { getUsdTryRate } = require('../utils/currency');
     const tryRate = await getUsdTryRate();
     
-    const allOrders = db.prepare('SELECT * FROM orders').all();
+    const allOrders = db.prepare("SELECT * FROM orders WHERE status IS NULL OR status != 'cancelled'").all();
     
     let total = { income: 0, expense: 0, profit: 0, income_t: 0, expense_t: 0, profit_t: 0 };
     let daily = { income: 0, expense: 0, profit: 0, income_t: 0, expense_t: 0, profit_t: 0 };
@@ -657,10 +887,10 @@ function setupAdminHandlers(bot) {
     const limit = 10;
     const offset = (page - 1) * limit;
 
-    const totalCount = db.prepare('SELECT COUNT(*) as count FROM orders').get().count;
+    const totalCount = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status IS NULL OR status != 'cancelled'").get().count;
     if (totalCount === 0) return ctx.answerCbQuery('Hiç sipariş bulunamadı.', { show_alert: true });
 
-    const orders = db.prepare('SELECT o.*, u.username, p.name as product_name FROM orders o LEFT JOIN users u ON o.user_id = u.id LEFT JOIN products p ON o.product_id = p.id ORDER BY o.id DESC LIMIT ? OFFSET ?').all(limit, offset);
+    const orders = db.prepare("SELECT o.*, u.username, p.name as product_name FROM orders o LEFT JOIN users u ON o.user_id = u.id LEFT JOIN products p ON o.product_id = p.id WHERE o.status IS NULL OR o.status != 'cancelled' ORDER BY o.id DESC LIMIT ? OFFSET ?").all(limit, offset);
     
     const buttons = orders.map(o => {
       let pName = o.product_name || 'Bilinmiyor';
@@ -681,27 +911,96 @@ function setupAdminHandlers(bot) {
     }).catch(e => {});
   });
 
+  /**
+   * Recompute the derived money columns of an order after an admin edit.
+   * Rates are taken from the existing row so a historic order keeps its own
+   * USD->TRY conversion instead of silently re-rating at today's rate.
+   */
+  function recalcOrder(order) {
+    const qty = order.qty || 1;
+    const sell = parseFloat(order.sell_usd) || 0;
+    const cost = parseFloat(order.cost_usd) || 0;
+    const profit = sell - cost * qty;
+
+    const sellTry = parseFloat(order.sell_try);
+    const rateFromSell = sell > 0 && Number.isFinite(sellTry) && sellTry > 0 ? sellTry / sell : null;
+    const rate = rateFromSell || 47.22;
+
+    return {
+      profit_usd: profit,
+      profit_try: profit * rate,
+      cost_usd: cost,
+      cost_try: cost * qty * rate,
+      sell_usd: sell,
+      sell_try: sell * rate
+    };
+  }
+
+  function orderDetailText(order, pName) {
+    const qty = order.qty || 1;
+    const sell = parseFloat(order.sell_usd) || 0;
+    const cost = parseFloat(order.cost_usd) || 0;
+    const profit = parseFloat(order.profit_usd != null ? order.profit_usd : sell - cost * qty);
+    const margin = cost > 0 ? ((sell - cost * qty) / (cost * qty)) * 100 : null;
+    const statusLine = order.status === 'cancelled' ? '\n🚫 <b>İPTAL EDİLDİ</b>' : '';
+    const editLine = order.edited_at
+      ? `\n✏️ Son düzenleme: ${order.edited_at}${order.edit_note ? ` — ${order.edit_note}` : ''}`
+      : '';
+
+    return `🟢 <b>Sipariş Detayı (#${order.id})</b>${statusLine}\n\n` +
+      `👤 Kullanıcı: @${order.username || order.user_id} (ID: ${order.user_id})\n` +
+      `📦 Ürün: ${pName}\n` +
+      `🔢 Adet: <b>${qty}</b>\n\n` +
+      `💵 Tahsil edilen: <b>${sell.toFixed(2)} USD</b>\n` +
+      `🧾 Maliyet: <b>${cost.toFixed(2)} USD</b> (adet başı ${(cost / (qty || 1)).toFixed(4)})\n` +
+      `💰 Kâr: <b>${profit.toFixed(2)} USD</b>${margin !== null ? ` (%${margin.toFixed(0)})` : ''}\n` +
+      `📅 Tarih: ${order.created_at}` +
+      (order.supplier_id ? `\n🏭 Kaynak: supplier #${order.supplier_id}${order.remote_service_id ? ` / ${order.remote_service_id}` : ''}` : '') +
+      editLine;
+  }
+
   bot.action(/^admin_order_detail_(\d+)$/, adminMiddleware, (ctx) => {
     const orderId = parseInt(ctx.match[1], 10);
     const order = db.prepare('SELECT o.*, u.username, p.name as product_name FROM orders o LEFT JOIN users u ON o.user_id = u.id LEFT JOIN products p ON o.product_id = p.id WHERE o.id = ?').get(orderId);
-    
+
     if (!order) return ctx.answerCbQuery('Sipariş bulunamadı.', { show_alert: true });
 
     let pName = order.product_name || 'Bilinmiyor';
     try { const parsed = JSON.parse(pName); pName = parsed['tr'] || parsed['en'] || pName; } catch (e) {}
 
-    const text = `🟢 <b>Sipariş Detayı (#${order.id})</b>\n\n👤 Kullanıcı: @${order.username || order.user_id} (ID: ${order.user_id})\n📦 Ürün: ${pName}\n🔢 Adet: ${order.qty}\n💵 Ödenen: ${order.sell_usd} USD\n📅 Tarih: ${order.created_at}`;
-
-    ctx.editMessageText(text, {
+    ctx.editMessageText(orderDetailText(order, pName), {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
+          [{ text: '✏️ Geliri (Ödenen) Düzenle', callback_data: `admin_order_edit_${order.id}_sell` }],
+          [{ text: '✏️ Maliyeti Düzenle', callback_data: `admin_order_edit_${order.id}_cost` }],
+          [{ text: '✏️ Kazancı (Kâr) Düzenle', callback_data: `admin_order_edit_${order.id}_profit` }],
           [{ text: '❌ İptal Et (Ücret İadesi Yap)', callback_data: `admin_order_cancel_${order.id}_yes` }],
           [{ text: '❌ İptal Et (İade Yapma)', callback_data: `admin_order_cancel_${order.id}_no` }],
           [{ text: '🔙 Listeye Dön', callback_data: 'admin_recent_completed_1' }]
         ]
       }
     }).catch(e => {});
+  });
+
+  const ORDER_EDIT_PROMPT = {
+    sell: '💵 <b>Gelir düzenleme</b>\nMüşterinin ödediği <b>toplam USD</b> tutarını girin (Örn: 74,45):\n<i>Kâr, yeni gelire göre yeniden hesaplanır.</i>',
+    cost: '🧾 <b>Maliyet düzenleme</b>\nBu siparişin <b>toplam</b> tedarikçi maliyetini USD girin (Örn: 2,90):\n<i>Kâr, yeni maliyete göre yeniden hesaplanır.</i>',
+    profit: '💰 <b>Kâr düzenleme</b>\nDoğrudan <b>kâr USD</b> girin (Örn: 45,50):\n<i>Gelir, maliyet + bu kâr olacak şekilde ayarlanır.</i>'
+  };
+
+  bot.action(/^admin_order_edit_(\d+)_(sell|cost|profit)$/, adminMiddleware, (ctx) => {
+    const orderId = parseInt(ctx.match[1], 10);
+    const field = ctx.match[2];
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    if (!order) return ctx.answerCbQuery('Sipariş bulunamadı.', { show_alert: true });
+
+    ctx.session = ctx.session || {};
+    ctx.session.adminState = `waiting_order_edit_${orderId}_${field}`;
+    ctx.editMessageText(
+      `${ORDER_EDIT_PROMPT[field]}\n\n<b>Sipariş #${orderId}</b> — mevcut: gelir ${order.sell_usd}$ / maliyet ${order.cost_usd}$ / kâr ${order.profit_usd}$`,
+      { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: `admin_order_detail_${orderId}` }]] } }
+    ).catch(e => {});
   });
 
   bot.action(/^admin_order_cancel_(\d+)_([a-z]+)$/, adminMiddleware, (ctx) => {
@@ -711,16 +1010,41 @@ function setupAdminHandlers(bot) {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     if (!order) return ctx.answerCbQuery('Sipariş bulunamadı.', { show_alert: true });
 
+    if (order.status === 'cancelled') {
+      return ctx.answerCbQuery('Bu sipariş zaten iptal edilmiş.', { show_alert: true });
+    }
+
     if (refund) {
       db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(order.sell_usd, order.user_id);
     }
-    
-    // orders tablosundan siliyoruz ki listeden kaybolsun (veya status eklemesi yapabilirsiniz ama mevcut şemada status yok)
-    db.prepare('DELETE FROM orders WHERE id = ?').run(orderId);
 
-    const msg = refund ? `✅ Sipariş silindi ve <b>${order.sell_usd} USD</b> bakiye kullanıcıya (ID: ${order.user_id}) iade edildi.` : `✅ Sipariş silindi. (İade yapılmadı)`;
-    
-    ctx.answerCbQuery('İşlem başarılı.').catch(()=>null);
+    // Soft cancel: keep the row for auditing (idempotent status column).
+    db.prepare("UPDATE orders SET status = 'cancelled', edited_at = CURRENT_TIMESTAMP, edited_by = ?, edit_note = ? WHERE id = ?")
+      .run(ctx.from.id, refund ? 'iptal + iade' : 'iptal (iade yok)', orderId);
+
+    // Return the delivered stock to the pool so it can be sold again.
+    let returned = 0;
+    try {
+      const delivered = order.delivered_data ? JSON.parse(order.delivered_data) : [];
+      if (Array.isArray(delivered) && delivered.length) {
+        const ids = db.prepare('SELECT id FROM stocks WHERE product_id = ? AND is_sold = 1 ORDER BY id DESC LIMIT ?')
+          .all(order.product_id, delivered.length)
+          .map((r) => r.id);
+        if (ids.length) {
+          const back = db.prepare('UPDATE stocks SET is_sold = 0 WHERE id = ?');
+          db.transaction(() => ids.forEach((id) => back.run(id)))();
+          returned = ids.length;
+        }
+      }
+    } catch (e) {
+      console.error('order cancel restock failed:', e.message);
+    }
+
+    const msg = `${refund
+      ? `✅ Sipariş #${orderId} iptal edildi, <b>${order.sell_usd} USD</b> kullanıcıya (ID: ${order.user_id}) iade edildi.`
+      : `✅ Sipariş #${orderId} iptal edildi. (İade yapılmadı)`}${returned ? `\n📦 ${returned} adet stok yeniden satışa alındı.` : ''}\nℹ️ Kayıt silinmedi, "İptal" olarak işaretlendi.`;
+
+    ctx.answerCbQuery('İşlem başarılı.').catch(() => null);
     ctx.editMessageText(msg, {
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard: [[{ text: '🔙 Listeye Dön', callback_data: 'admin_recent_completed_1' }]] }
@@ -830,8 +1154,8 @@ function setupAdminHandlers(bot) {
     else if (state === 'waiting_product_price') {
       if (!ctx.message.text) return ctx.reply('❌ Lütfen sadece sayı gönderin.');
       
-      const price = parseFloat(ctx.message.text.trim().replace(',', '.'));
-      if (isNaN(price) || price <= 0) {
+      const price = parseMoney(ctx.message.text);
+      if (price === null || price <= 0) {
         return ctx.reply('❌ Lütfen geçerli bir fiyat girin (Örn: 15 veya 10.5)');
       }
 
@@ -845,8 +1169,8 @@ function setupAdminHandlers(bot) {
     else if (state === 'waiting_product_cost') {
       if (!ctx.message.text) return ctx.reply('❌ Lütfen sadece sayı gönderin.');
       
-      const costUsd = parseFloat(ctx.message.text.trim().replace(',', '.'));
-      if (isNaN(costUsd) || costUsd < 0) {
+      const costUsd = parseMoney(ctx.message.text);
+      if (costUsd === null || costUsd < 0) {
         return ctx.reply('❌ Lütfen geçerli bir maliyet girin (Örn: 0.50).');
       }
 
@@ -871,10 +1195,10 @@ function setupAdminHandlers(bot) {
     }
     else if (state && state.startsWith('waiting_price_increase_')) {
       const productId = parseInt(state.split('_')[3], 10);
-      const percentageStr = ctx.message.text.trim().replace('%', '');
-      const percentage = parseFloat(percentageStr);
+      const percentageStr = ctx.message.text.trim();
+      const percentage = parseMoney(percentageStr);
 
-      if (isNaN(percentage)) {
+      if (percentage === null) {
         return ctx.reply('Lütfen geçerli bir sayı girin (Örn: 20 veya -10):');
       }
 
@@ -916,8 +1240,8 @@ function setupAdminHandlers(bot) {
     }
     else if (state && state.startsWith('waiting_edit_price_')) {
       const productId = parseInt(state.split('_')[3], 10);
-      const price = parseFloat(ctx.message.text.trim().replace(',', '.'));
-      if (isNaN(price) || price <= 0) return ctx.reply('❌ Geçerli bir fiyat girin.');
+      const price = parseMoney(ctx.message.text);
+      if (price === null || price <= 0) return ctx.reply('❌ Geçerli bir fiyat girin.');
       
       db.prepare('UPDATE products SET price = ? WHERE id = ?').run(price, productId);
       ctx.session.adminState = `waiting_edit_cost_${productId}`;
@@ -925,8 +1249,8 @@ function setupAdminHandlers(bot) {
     }
     else if (state && state.startsWith('waiting_edit_cost_')) {
       const productId = parseInt(state.split('_')[3], 10);
-      const cost = parseFloat(ctx.message.text.trim().replace(',', '.'));
-      if (isNaN(cost) || cost < 0) return ctx.reply('❌ Geçerli bir maliyet girin.');
+      const cost = parseMoney(ctx.message.text);
+      if (cost === null || cost < 0) return ctx.reply('❌ Geçerli bir maliyet girin.');
       
       db.prepare('UPDATE products SET cost_usd = ? WHERE id = ?').run(cost, productId);
       ctx.session.adminState = null;
@@ -936,7 +1260,7 @@ function setupAdminHandlers(bot) {
     }
     else if (state && state.startsWith('waiting_bulk_qty_')) {
       const productId = parseInt(state.split('_')[3], 10);
-      const qty = parseInt(ctx.message.text.trim(), 10);
+      const qty = require('../utils/money').parseQuantity(ctx.message.text);
       if (isNaN(qty) || qty <= 0) return ctx.reply('❌ Geçerli bir adet girin.');
       
       ctx.session.adminState = null;
@@ -959,8 +1283,8 @@ function setupAdminHandlers(bot) {
       const minQty = parseInt(parts[4], 10);
       const type = parts[5];
       
-      const val = parseFloat(ctx.message.text.trim().replace(',', '.'));
-      if (isNaN(val) || val <= 0) return ctx.reply('❌ Geçerli bir miktar girin.');
+      const val = parseMoney(ctx.message.text);
+      if (val === null || val <= 0) return ctx.reply('❌ Geçerli bir miktar girin.');
       
       if (type === 'percent') {
         db.prepare('INSERT INTO product_bulk_discounts (product_id, min_qty, discount_percent, fixed_price) VALUES (?, ?, ?, NULL)').run(productId, minQty, val);
@@ -1035,10 +1359,9 @@ function setupAdminHandlers(bot) {
     }
     else if (state.startsWith('waiting_stock_cost_')) {
       const productId = parseInt(state.split('_')[3], 10);
-      const input = ctx.message.text.trim().replace(',', '.');
-      const costUsd = parseFloat(input);
+      const costUsd = parseMoney(ctx.message.text);
       
-      if (isNaN(costUsd) || costUsd < 0) {
+      if (costUsd === null || costUsd < 0) {
         return ctx.reply('❌ Lütfen geçerli bir maliyet tutarı girin (Örn: 0.50).');
       }
 
@@ -1067,14 +1390,12 @@ function setupAdminHandlers(bot) {
       const productId = parseInt(parts[3], 10);
       const qty = parseInt(parts[4], 10);
       
-      const input = ctx.message.text.trim().toUpperCase();
-      let normalizedInput = input.replace(/,/g, '.');
-      let amount = parseFloat(normalizedInput.replace(/[^0-9.]/g, ''));
-      if (isNaN(amount) || amount <= 0) {
-        return ctx.reply('❌ Lütfen geçerli bir tutar girin.');
+      const raw = ctx.message.text;
+      const isTL = /(TL|TRY|₺)/i.test(raw);
+      const amount = parseMoney(raw, { currency: isTL ? 'TL' : 'USD' });
+      if (amount === null || amount <= 0) {
+        return ctx.reply('❌ Lütfen geçerli bir tutar girin. Örn: 74,45 USD veya 1.450 TL');
       }
-      
-      const isTL = input.includes('TL') || input.includes('TRY');
       
       ctx.reply('⏳ İşlem gerçekleştiriliyor, stoklar teslim ediliyor...');
       ctx.session.adminState = null;
@@ -1172,10 +1493,146 @@ function setupAdminHandlers(bot) {
     }
 
 
+    // --- Sipariş geliri / maliyeti / kazancı düzenleme ---
+    else if (state && state.startsWith('waiting_order_edit_')) {
+      const parts = state.split('_'); // waiting_order_edit_<id>_<field>
+      const orderId = parseInt(parts[3], 10);
+      const field = parts[4];
+      const order = db.prepare('SELECT o.*, u.username, p.name as product_name FROM orders o LEFT JOIN users u ON o.user_id = u.id LEFT JOIN products p ON o.product_id = p.id WHERE o.id = ?').get(orderId);
+      if (!order) {
+        ctx.session.adminState = null;
+        return ctx.reply('❌ Sipariş bulunamadı.');
+      }
+
+      const input = parseMoney(ctx.message.text);
+      if (input === null || input < 0) {
+        return ctx.reply('❌ Geçerli bir tutar girin (Örn: 74,45 veya 2.90).');
+      }
+
+      const updated = { ...order };
+      let note;
+      if (field === 'sell') {
+        updated.sell_usd = input;
+        note = `gelir ${order.sell_usd} -> ${input}`;
+      } else if (field === 'cost') {
+        updated.cost_usd = input;
+        note = `maliyet ${order.cost_usd} -> ${input}`;
+      } else { // profit -> derive sell so profit_usd becomes exactly `input`
+        const cost = parseFloat(order.cost_usd) || 0;
+        updated.sell_usd = input + cost * (order.qty || 1);
+        note = `kâr ${order.profit_usd} -> ${input}`;
+      }
+
+      const calc = recalcOrder(updated);
+      db.prepare(`
+        UPDATE orders
+        SET sell_usd = @sell_usd, sell_try = @sell_try,
+            cost_usd = @cost_usd, cost_try = @cost_try,
+            profit_usd = @profit_usd, profit_try = @profit_try,
+            edited_by = @edited_by, edited_at = CURRENT_TIMESTAMP, edit_note = @edit_note
+        WHERE id = @id
+      `).run({ ...calc, edited_by: ctx.from.id, edit_note: note, id: orderId });
+
+      // Keep the matching transaction row in sync when it is unambiguous,
+      // otherwise the wallet/stat screens would disagree with orders.
+      if (field !== 'cost') {
+        const newSell = calc.sell_usd;
+        const oldSell = parseFloat(order.sell_usd) || 0;
+        const tx = db.prepare(
+          "SELECT id FROM transactions WHERE user_id = ? AND product_id = ? AND CAST(amount AS REAL) = CAST(? AS REAL) AND status IN ('SUCCESS','completed') ORDER BY id DESC LIMIT 2"
+        ).all(order.user_id, order.product_id, oldSell);
+        if (tx.length === 1) {
+          const rate = oldSell > 0 ? calc.sell_try / calc.sell_usd : 47.22;
+          db.prepare('UPDATE transactions SET amount = ?, amount_try = ? WHERE id = ?').run(newSell, newSell * rate, tx[0].id);
+        }
+      }
+
+      // A reservation-linked order (qty 0 style reservation orders) also carries
+      // profit columns; mirror the same edit there if one matches.
+      const linkedRes = db.prepare(
+        'SELECT id FROM reservations WHERE user_id = ? AND product_id = ? AND CAST(sell_usd AS REAL) = CAST(? AS REAL) ORDER BY id DESC LIMIT 1'
+      ).get(order.user_id, order.product_id, order.sell_usd);
+      if (linkedRes && field !== 'profit') {
+        const res = db.prepare('SELECT * FROM reservations WHERE id = ?').get(linkedRes.id);
+        const resCalc = recalcOrder({ ...res, sell_usd: field === 'sell' ? calc.sell_usd : res.sell_usd, cost_usd: field === 'cost' ? calc.cost_usd : res.cost_usd });
+        db.prepare('UPDATE reservations SET sell_usd=?, sell_try=?, cost_usd=?, cost_try=?, profit_usd=?, profit_try=? WHERE id=?')
+          .run(resCalc.sell_usd, resCalc.sell_try, resCalc.cost_usd, resCalc.cost_try, resCalc.profit_usd, resCalc.profit_try, linkedRes.id);
+      }
+
+      ctx.session.adminState = null;
+
+      const after = db.prepare('SELECT o.*, u.username, p.name as product_name FROM orders o LEFT JOIN users u ON o.user_id = u.id LEFT JOIN products p ON o.product_id = p.id WHERE o.id = ?').get(orderId);
+      let pName = after.product_name || 'Bilinmiyor';
+      try { const parsed = JSON.parse(pName); pName = parsed['tr'] || parsed['en'] || pName; } catch (e) {}
+
+      ctx.reply(`✅ Sipariş #${orderId} güncellendi (${note}).`, {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Sipariş Detayı', callback_data: `admin_order_detail_${orderId}` }]] }
+      }).catch(() => {});
+      ctx.reply(orderDetailText(after, pName), { parse_mode: 'HTML' }).catch(() => {});
+    }
+
+
+    // --- Ürün varsayılan kâr / alt limit girişleri ---
+    else if (state && state.startsWith('waiting_product_margin_')) {
+      const productId = parseInt(state.split('_')[3], 10);
+      const margin = parseMoney(ctx.message.text);
+      if (margin === null || margin < 0 || margin > 100000) return ctx.reply('❌ Geçerli bir yüzde girin (Örn: 150).');
+      db.prepare('UPDATE products SET default_margin_percent = ? WHERE id = ?').run(margin, productId);
+      ctx.session.adminState = null;
+      ctx.reply(`✅ Ürün #${productId} varsayılan kâr: %${margin}`, {
+        reply_markup: { inline_keyboard: [[{ text: '🧮 Fiyalama Ekranı', callback_data: `admin_prod_pricing_${productId}` }]] }
+      });
+    }
+    else if (state && state.startsWith('waiting_product_floor_')) {
+      const productId = parseInt(state.split('_')[3], 10);
+      const floor = parseMoney(ctx.message.text);
+      if (floor === null || floor < 0) return ctx.reply('❌ Geçerli bir alt limit girin (0 = yok).');
+      db.prepare('UPDATE products SET default_floor_price = ? WHERE id = ?').run(floor, productId);
+      ctx.session.adminState = null;
+      ctx.reply(`✅ Ürün #${productId} alt limit: $${floor}`, {
+        reply_markup: { inline_keyboard: [[{ text: '🧮 Fiyalama Ekranı', callback_data: `admin_prod_pricing_${productId}` }]] }
+      });
+    }
+
+    else if (state && state.startsWith('waiting_link_margin_')) {
+      const parts = state.split('_'); // waiting_link_margin_<productId>_<psId>
+      const productId = parseInt(parts[3], 10);
+      const psId = parseInt(parts[4], 10);
+      const txt = ctx.message.text.trim();
+      if (/^(clear|varsayilan|default)$/i.test(txt)) {
+        db.prepare('UPDATE product_suppliers SET margin_percent = NULL WHERE id = ?').run(psId);
+      } else {
+        const margin = parseMoney(txt);
+        if (margin === null || margin < 0 || margin > 100000) return ctx.reply('❌ Geçerli bir yüzde girin (Örn: 150) veya "clear" yazın.');
+        db.prepare('UPDATE product_suppliers SET margin_percent = ? WHERE id = ?').run(margin, psId);
+      }
+      ctx.session.adminState = null;
+      return ctx.reply(`✅ Bağlantı #${psId} kâr ayarlandı.`, {
+        reply_markup: { inline_keyboard: [[{ text: '🏭 Teklif Detayı', callback_data: `admin_prod_sup_detail_${productId}_${psId}` }]] }
+      });
+    }
+    else if (state && state.startsWith('waiting_link_floor_')) {
+      const parts = state.split('_');
+      const productId = parseInt(parts[3], 10);
+      const psId = parseInt(parts[4], 10);
+      const txt = ctx.message.text.trim();
+      if (/^(clear|varsayilan|default)$/i.test(txt)) {
+        db.prepare('UPDATE product_suppliers SET floor_price = NULL WHERE id = ?').run(psId);
+      } else {
+        const floor = parseMoney(txt);
+        if (floor === null || floor < 0) return ctx.reply('❌ Geçerli bir alt limit girin (Örn: 3) veya "clear" yazın.');
+        db.prepare('UPDATE product_suppliers SET floor_price = ? WHERE id = ?').run(floor, psId);
+      }
+      ctx.session.adminState = null;
+      return ctx.reply(`✅ Bağlantı #${psId} alt limit ayarlandı.`, {
+        reply_markup: { inline_keyboard: [[{ text: '🏭 Teklif Detayı', callback_data: `admin_prod_sup_detail_${productId}_${psId}` }]] }
+      });
+    }
+
     else if (state === 'waiting_group_add') {
       const args = ctx.message.text.split(' ');
       if (args.length < 2) return ctx.reply('❌ Hatalı format. Örn: VIP 15');
-      const discount = parseFloat(args.pop());
+      const discount = parseMoney(args.pop());
       const name = args.join(' ');
       try {
         const info = db.prepare('INSERT INTO pricing_groups (name, discount_percent) VALUES (?, ?)').run(name, discount);
@@ -1344,8 +1801,8 @@ function setupAdminHandlers(bot) {
       ctx.reply(`Mevcut bakiye: ${curBal}$\nEklenecek tutarı girin (Silmek için başına - koyun, örn: -5):`);
     }
     else if (state === 'waiting_balance_amount') {
-      const amount = parseFloat(ctx.message.text.trim());
-      if (isNaN(amount)) return ctx.reply('❌ Geçerli bir tutar girin.');
+      const amount = parseMoney(ctx.message.text);
+      if (amount === null) return ctx.reply('❌ Geçerli bir tutar girin.');
       const uid = ctx.session.balanceUserId;
       
       try {
@@ -1372,8 +1829,8 @@ function setupAdminHandlers(bot) {
       ctx.reply('Değeri girin (Örn: Bakiye için 2, indirim için 15):');
     }
     else if (state === 'waiting_promo_val') {
-      const val = parseFloat(ctx.message.text.trim());
-      if (isNaN(val)) return ctx.reply('❌ Geçerli sayı girin.');
+      const val = parseMoney(ctx.message.text);
+      if (val === null) return ctx.reply('❌ Geçerli sayı girin.');
       ctx.session.promoVal = val;
       ctx.session.adminState = 'waiting_promo_expires';
       ctx.reply('Kaç saat geçerli olacak? (Sınırsız için 0 yazın):');
@@ -1407,8 +1864,8 @@ function setupAdminHandlers(bot) {
       ctx.reply('Global indirim yüzdesi (Sadece özel ürün fiyatı olacaksa 0 yazın):');
     }
     else if (state === 'waiting_rank_discount') {
-      const disc = parseFloat(ctx.message.text.trim());
-      if (isNaN(disc)) return ctx.reply('❌ Sayı girin.');
+      const disc = parseMoney(ctx.message.text);
+      if (disc === null) return ctx.reply('❌ Sayı girin.');
       
       try {
         db.prepare('INSERT INTO ranks (name, min_purchases, discount_percent) VALUES (?, ?, ?)').run(
@@ -1430,8 +1887,8 @@ function setupAdminHandlers(bot) {
       ctx.reply('Bayiye tanınacak limit bakiye (Sınırsız ise 0 yazın):');
     }
     else if (state === 'waiting_reseller_limit') {
-      const limit = parseFloat(ctx.message.text.trim());
-      if (isNaN(limit)) return ctx.reply('❌ Sayı girin.');
+      const limit = parseMoney(ctx.message.text);
+      if (limit === null) return ctx.reply('❌ Sayı girin.');
       
       try {
         const adminId = ctx.from.id;
@@ -1473,8 +1930,8 @@ function setupAdminHandlers(bot) {
     }
 
     else if (state === 'waiting_tier_price') {
-      const price = parseFloat(ctx.message.text.trim());
-      if (isNaN(price)) return ctx.reply('❌ Lütfen geçerli bir sayı (fiyat) girin.');
+      const price = parseMoney(ctx.message.text);
+      if (price === null) return ctx.reply('❌ Lütfen geçerli bir sayı (fiyat) girin.');
       
       ctx.session.buildingTierTemp.price = price;
       
@@ -1496,8 +1953,8 @@ function setupAdminHandlers(bot) {
     }
 
     else if (state === 'waiting_reservation_fee') {
-      const fee = parseFloat(ctx.message.text.trim());
-      if (isNaN(fee) || fee < 0) {
+      const fee = parseMoney(ctx.message.text);
+      if (fee === null || fee < 0) {
         return ctx.reply('❌ Geçersiz bir sayı girdiniz. Lütfen pozitif bir ücret girin (örn: 0.10).');
       }
       
