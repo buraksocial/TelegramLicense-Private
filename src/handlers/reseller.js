@@ -100,8 +100,8 @@ function setupResellerHandlers(bot) {
       ctx.reply(t(lang, 'reseller_enter_bal_amount', { uid, limit: limitStr }));
     }
     else if (state === 'waiting_bal_amount') {
-      const amount = parseFloat(ctx.message.text.trim().replace(',', '.'));
-      if (isNaN(amount) || amount <= 0) return ctx.reply(t(lang, 'reseller_error', { msg: "Invalid amount" }) || '❌');
+      const amount = require('../utils/money').parseMoney(ctx.message.text);
+      if (amount === null || amount <= 0) return ctx.reply(t(lang, 'reseller_error', { msg: "Invalid amount" }) || '❌');
       
       if (ctx.resellerData.balance_limit !== 0 && amount > ctx.resellerData.balance_limit) {
          return ctx.reply(t(lang, 'reseller_limit_exceeded', { limit: ctx.resellerData.balance_limit }));
