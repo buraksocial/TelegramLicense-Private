@@ -11,6 +11,7 @@
  */
 const { db } = require('../db');
 const { hashText } = require('./TranslationService');
+const { warrantyAllows } = require('../utils/warranty');
 
 const BRANDS = [
   'gemini', 'chatgpt', 'gpt', 'openai', 'claude', 'copilot', 'cursor',
@@ -120,7 +121,12 @@ class CatalogMatcher {
     for (const c of catalogs) {
       let best = null;
       let bestScore = 0;
+      const cClass = c.warranty || 'unknown';
       for (const p of products) {
+        // never suggest cross-warranty links: a guaranteed service must not be
+        // offered for an instant (no-warranty) product and vice versa
+        const pw = p.warranty || 'none';
+        if (pw !== 'none' && !warrantyAllows(pw, cClass)) continue;
         const s = scoreMatch(c.name, productNameEn(p));
         if (s > bestScore) {
           bestScore = s;

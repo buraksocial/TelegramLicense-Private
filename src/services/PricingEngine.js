@@ -26,6 +26,7 @@
  */
 const { db } = require('../db');
 const CatalogStore = require('./CatalogStore');
+const { effectiveWarranty, warrantyAllows } = require('../utils/warranty');
 
 function parseTiers(raw) {
   if (!raw) return null;
@@ -113,9 +114,13 @@ class PricingEngine {
           name: link.note || product.name,
           price_usd: link.last_price_usd ?? (manual ? manual[0].price : 0),
           stock: link.last_stock ?? null,
+          warranty: 'unknown',
           tiers: manual || [{ min: 1, max: Infinity, price: link.last_price_usd ?? 0 }]
         };
       }
+
+      // Warranty class of THIS offer: admin link override wins, else catalog row.
+      const offerWarranty = effectiveWarranty(link.warranty, remote.warranty);
 
       const effectiveTiers = parseTiers(link.manual_tiers) || remote.tiers || [{ min: 1, max: Infinity, price: remote.price_usd }];
       const unitCost = tierPrice(effectiveTiers, qty) ?? remote.price_usd;
@@ -132,7 +137,11 @@ class PricingEngine {
       const marginPct = unitCost > 0 ? ((sellUnit - unitCost) / unitCost) * 100 : 0;
 
       let reason = null;
-      if (balance === null) reason = 'no_balance';
+      // Warranty gate: a guaranteed product must not be priced/served by an
+      // instant offer, and vice-versa (see utils/warranty for the matrix).
+      if (!warrantyAllows(product.warranty, offerWarranty)) {
+        reason = 'warranty_mismatch';
+      } else if (balance === null) reason = 'no_balance';
       else if (balance < cost) reason = 'insufficient_balance';
       else if (realStock !== null && realStock <= (supplier.min_stock_buffer || 0)) reason = 'below_buffer';
       else if (realStock !== null && realStock < qty) reason = 'out_of_stock';
@@ -151,6 +160,7 @@ class PricingEngine {
         balance,
         margin,
         floor,
+        warranty: offerWarranty,
         sellUnit: round2(sellUnit),
         marginPct: Math.round(marginPct * 10) / 10,
         priority: link.priority,

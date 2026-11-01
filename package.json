@@ -10,8 +10,9 @@
     "audit:money": "node scripts/audit_money.js",
     "test:pricing": "node scripts/test_pricing.js",
     "test:matcher": "node scripts/test_matcher.js",
+    "test:warranty": "node scripts/test_warranty.js",
     "test:checkout": "SUPPLIER_DRY_RUN=1 node scripts/test_dry_checkout.js",
-    "test": "node scripts/test_money.js && node scripts/test_pricing.js && node scripts/test_matcher.js"
+    "test": "node scripts/test_money.js && node scripts/test_pricing.js && node scripts/test_matcher.js && node scripts/test_warranty.js"
   },
   "keywords": [],
   "author": "",

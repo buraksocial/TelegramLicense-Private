@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const { db } = require('../db');
 const { getGovernor } = require('./RateGovernor');
 const { CATALOG_MAX_AGE_MS } = require('../constants');
+const { classifyWarranty } = require('../utils/warranty');
 
 const memory = new Map(); // supplierId -> { services, fetchedAt }
 const inFlight = new Map(); // supplierId -> Promise
@@ -42,6 +43,7 @@ function readSnapshot(supplierId) {
     price_usd: r.price_usd,
     stock: r.stock,
     tiers: r.tiers_json ? JSON.parse(r.tiers_json) : null,
+    warranty: r.warranty || 'unknown',
     content_hash: r.content_hash,
     fetched_at: r.fetched_at
   }));
@@ -76,6 +78,11 @@ async function getCatalog(supplier, { maxAgeMs = CATALOG_MAX_AGE_MS, force = fal
     try {
       const adapter = getAdapter(supplier);
       const services = await adapter.fetchCatalog(supplier);
+      // classify warranty on the LIVE objects too (memory serves these directly;
+      // the DB snapshot is classified inside upsertRows)
+      for (const s of services) {
+        if (!s.warranty) s.warranty = classifyWarranty(`${s.name || ''} ${s.description || ''}`);
+      }
       const fetchedAt = Date.now();
       memory.set(supplier.id, { services, fetchedAt });
       upsertRows(supplier.id, services);
@@ -98,8 +105,8 @@ async function getCatalog(supplier, { maxAgeMs = CATALOG_MAX_AGE_MS, force = fal
 
 const upsert = db.prepare(`
   INSERT INTO supplier_catalogs
-    (supplier_id, remote_service_id, name, description, category_raw, price_usd, stock, tiers_json, currency, content_hash, fetched_at)
-  VALUES (@supplier_id, @remote_service_id, @name, @description, @category_raw, @price_usd, @stock, @tiers_json, @currency, @content_hash, CURRENT_TIMESTAMP)
+    (supplier_id, remote_service_id, name, description, category_raw, price_usd, stock, tiers_json, currency, content_hash, warranty, fetched_at)
+  VALUES (@supplier_id, @remote_service_id, @name, @description, @category_raw, @price_usd, @stock, @tiers_json, @currency, @content_hash, @warranty, CURRENT_TIMESTAMP)
   ON CONFLICT (supplier_id, remote_service_id) DO UPDATE SET
     name = excluded.name,
     description = excluded.description,
@@ -109,6 +116,7 @@ const upsert = db.prepare(`
     tiers_json = excluded.tiers_json,
     currency = excluded.currency,
     content_hash = excluded.content_hash,
+    warranty = excluded.warranty,
     fetched_at = CURRENT_TIMESTAMP
 `);
 
@@ -127,7 +135,8 @@ function upsertRows(supplierId, services) {
         stock: s.stock ?? null,
         tiers_json: s.tiers ? JSON.stringify(s.tiers.map((t) => ({ ...t, max: t.max === Infinity ? null : t.max }))) : null,
         currency: s.currency || 'USD',
-        content_hash: h
+        content_hash: h,
+        warranty: classifyWarranty(`${s.name || ''} ${s.description || ''}`)
       });
       seen.add(s.remote_service_id);
     }
