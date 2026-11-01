@@ -890,13 +890,60 @@ function setupAdminHandlers(bot) {
     }
   });
 
+  // Bir kullanıcıyı yazılı girdiden çözümle: sayısal ID veya @kullanıcıadı.
+  // (Telefon numarası tabloda tutulmadığı için desteklenmez.)
+  function resolveUserToken(raw) {
+    const s = String(raw || '').trim().replace(/^@/, '');
+    if (/^\d{1,20}$/.test(s)) {
+      const id = parseInt(s, 10);
+      const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+      if (u) return { ok: true, user: u, via: 'ID' };
+      return { ok: false, error: `ID <code>${id}</code> ile kayıtlı kullanıcı yok — kişi önce botu başlatmış olmalı (veya mesajını ileterek ID'yi otomatik alın).`, suggestId: id };
+    }
+    if (/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(s)) {
+      const u = db.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE').get(s);
+      if (u) return { ok: true, user: u, via: '@' + s };
+      return { ok: false, error: `<b>@${s}</b> ile kayıtlı kullanıcı yok. Kişi botu hiç başlatmamış olabilir — bir mesajını buraya <b>iletin</b>, ID'sini otomatik alayım.` };
+    }
+    return { ok: false, error: 'Geçerli bir <b>User ID</b> veya <b>@kullanıcıadı</b> yazın.' };
+  }
+
+  // İletilen mesajdan asıl göndereni çıkarır (Bot API 7.2 forward_origin; eski
+  // istemcilerden gelen forward_from yedeğiyle).
+  function forwardedUser(ctx) {
+    const m = ctx.message || {};
+    const org = m.forward_origin;
+    if (org && org.type === 'user' && (org.sender_user_id || org.sender_user?.id)) {
+      const su = org.sender_user || {};
+      return { id: org.sender_user_id || su.id, username: org.sender_user_name || su.username || null, first_name: su.first_name || org.author_signature || null };
+    }
+    if (m.forward_from) {
+      return { id: m.forward_from.id, username: m.forward_from.username || null, first_name: m.forward_from.first_name || null };
+    }
+    return null;
+  }
+
+  // Kullanıcı satırını garanti eder (iletilen mesajdan gelenler için).
+  function ensureUserRow(fu) {
+    db.prepare('INSERT OR IGNORE INTO users (id, username, first_name) VALUES (?, ?, ?)').run(fu.id, fu.username, fu.first_name);
+    if (fu.username) {
+      db.prepare("UPDATE users SET username = ? WHERE id = ? AND (username IS NULL OR username = '')").run(fu.username, fu.id);
+    }
+  }
+
   bot.action('admin_balance_menu', adminMiddleware, (ctx) => {
     ctx.session = ctx.session || {};
     ctx.session.adminState = 'waiting_balance_user_id';
-    ctx.editMessageText('💼 <b>Bakiye Yönetimi</b>\nLütfen bakiyesini güncellemek istediğiniz kullanıcının <b>User ID</b>\'sini yazın:', {
-      parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: 'admin_cancel' }]] }
-    }).catch(e => {});
+    ctx.editMessageText(
+      '💼 <b>Bakiye Yönetimi</b>\nKullanıcıyı belirtin — üç yoldan biri:\n' +
+      '• <code>123456789</code> (User ID)\n' +
+      '• <code>@kullanıcıadı</code>\n' +
+      '• Kişinin herhangi bir mesajını <b>buraya iletin</b> (ID otomatik alınır) 💉',
+      {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: 'admin_cancel' }]] }
+      }
+    ).catch(e => {});
   });
 
   bot.action('admin_promo_menu', adminMiddleware, (ctx) => {
@@ -1833,29 +1880,52 @@ function setupAdminHandlers(bot) {
       } catch(e) { ctx.reply(`❌ Hata: ${e.message}`); }
     }
 
-    // MEGA UPDATE: Bakiye Yönetimi
+    // MEGA UPDATE: Bakiye Yönetimi — ID, @username veya iletmeden otomatik tanımlama
     else if (state === 'waiting_balance_user_id') {
-      const uid = parseInt(ctx.message.text.trim(), 10);
-      if (isNaN(uid)) return ctx.reply('❌ Geçerli bir User ID girin.');
+      let target = null;
+
+      const fu = forwardedUser(ctx);
+      if (fu) {
+        ensureUserRow(fu);
+        target = db.prepare('SELECT * FROM users WHERE id = ?').get(fu.id);
+        ctx.reply(`📩 İletilen mesajdan çözüldü: <b>${(target && target.username ? '@' + target.username : (fu.first_name || fu.id))}</b>\n<code>${fu.id}</code>`, { parse_mode: 'HTML' });
+      } else {
+        const r = resolveUserToken(ctx.message.text || ctx.message.caption);
+        if (r.error) return ctx.reply(r.error, { parse_mode: 'HTML' });
+        target = r.user;
+      }
+
       ctx.session.adminState = 'waiting_balance_amount';
-      ctx.session.balanceUserId = uid;
-      
-      const user = db.prepare('SELECT balance FROM users WHERE id = ?').get(uid);
-      const curBal = user ? (user.balance || 0).toFixed(2) : 'Kullanıcı bulunamadı/Bakiye 0';
-      ctx.reply(`Mevcut bakiye: ${curBal}$\nEklenecek tutarı girin (Silmek için başına - koyun, örn: -5):`);
+      ctx.session.balanceUserId = target.id;
+
+      const who = `${target.username ? '@' + target.username : (target.first_name || '')} <code>${target.id}</code>`;
+      ctx.reply(
+        `👤 Hedef: ${who}\nMevcut bakiye: <b>${(target.balance || 0).toFixed(2)}$</b>\n\n` +
+        `Eklenecek tutarı girin (Silmek için başına - koyun, örn: -5):`,
+        { parse_mode: 'HTML' }
+      );
     }
     else if (state === 'waiting_balance_amount') {
       const amount = parseMoney(ctx.message.text);
-      if (amount === null) return ctx.reply('❌ Geçerli bir tutar girin.');
+      if (amount === null) return ctx.reply('❌ Geçerli bir tutar girin (örn: 10 veya 10,50 veya -5).');
       const uid = ctx.session.balanceUserId;
-      
-      try {
-        db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(amount, uid);
-        sendWalletTopUpLog(ctx.telegram, uid, amount);
-        ctx.reply(`✅ Kullanıcının bakiyesi başarıyla <b>${amount}$</b> artırıldı!`, { parse_mode: 'HTML' });
-      } catch (e) {
-        ctx.reply(`❌ Hata: ${e.message}`);
+
+      const before = db.prepare('SELECT balance FROM users WHERE id = ?').get(uid);
+      if (!before) {
+        ctx.session.adminState = null;
+        return ctx.reply('❌ Kullanıcı kaydı bulunamadı (kişi botu hiç başlatmamış).');
       }
+      if ((before.balance || 0) + amount < 0) {
+        return ctx.reply(`❌ Bakiye eksiye düşer (mevcut: ${(before.balance || 0).toFixed(2)}$). Daha küçük bir silme tutarı girin veya iptal edin.`);
+      }
+
+      db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(amount, uid);
+      sendWalletTopUpLog(ctx.telegram, uid, amount);
+      const after = ((before.balance || 0) + amount).toFixed(2);
+      ctx.reply(
+        `✅ ${amount >= 0 ? 'Yükleme' : 'Düşüm'}: <b>${amount}$</b>\nYeni bakiye: <b>${after}$</b> (<code>${uid}</code>)`,
+        { parse_mode: 'HTML' }
+      );
       ctx.session.adminState = null;
     }
 
