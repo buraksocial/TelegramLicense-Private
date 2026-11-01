@@ -51,6 +51,7 @@ a{color:var(--acc)}
   <div class="balance" id="balChip" style="display:none"></div>
   <button class="ghost" id="btnLang" style="padding:6px 10px;font-size:13px">EN/TR</button>
   <button class="ghost" id="btnOrders" style="padding:6px 10px;font-size:13px" data-i="nav_orders">Siparişlerim</button>
+  <a href="/admin.html" id="btnAdmin" style="display:none"><button class="ghost" style="padding:6px 10px;font-size:13px">⚙️ Admin</button></a>
   <button class="ghost" id="btnOut" style="padding:6px 10px;font-size:13px;display:none" data-i="nav_logout">Çıkış</button>
 </header>
 <nav class="cats" id="cats"></nav>
@@ -102,6 +103,7 @@ async function loadShell(){
   try{state.me=await api('me');}catch(e){if(e.status===401){state.token=null;localStorage.removeItem('shop_token');renderLogin();return}}
   $('#balChip').style.display='block';setBal(state.me.balance);
   $('#btnOut').style.display='inline-block';
+  if(state.me.is_admin)$('#btnAdmin').style.display='inline-block';
   const prods=await api('products');
   state.products=prods.products||[];
   renderCats();renderProducts();

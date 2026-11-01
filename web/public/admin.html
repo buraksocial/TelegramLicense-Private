@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⚙️ Admin Panel — TelegramLisans</title>
+<style>
+:root{--bg:#0f1115;--panel:#161b24;--line:#2a3140;--tx:#e6e6e6;--mut:#8b95a7;--acc:#4c9ffe;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,Segoe UI,Arial;background:var(--bg);color:var(--tx);font-size:14px}
+header{display:flex;gap:10px;align-items:center;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+header .logo{font-weight:700}
+nav{display:flex;gap:6px;flex-wrap:wrap}
+nav button{background:none;border:1px solid var(--line);color:var(--mut);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px}
+nav button.on{color:#fff;border-color:var(--acc);background:#1b2b45}
+main{padding:16px;max-width:1200px;margin:0 auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.stat b{font-size:20px;display:block}
+.stat span{color:var(--mut);font-size:12px}
+table{border-collapse:collapse;width:100%}
+th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;font-size:13px;vertical-align:top}
+th{color:var(--mut);font-weight:600}
+tr:hover td{background:#181f2b}
+input,select{background:#0d1017;border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:8px 10px;font-size:13px}
+button.btn{background:var(--acc);border:0;color:#fff;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px}
+button.gh{background:none;border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:7px 12px;cursor:pointer;font-size:13px}
+button.danger{background:#5b1f1f;border:1px solid #7a2626;color:#ffb4b4;border-radius:8px;padding:6px 10px;cursor:pointer}
+.pill{font-size:11px;border-radius:999px;padding:2px 9px;border:1px solid var(--line)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.mut{color:var(--mut)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;z-index:20}
+.modal.on{display:flex;align-items:flex-start;justify-content:center;overflow:auto}
+.sheet{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin:40px auto;max-width:860px;width:min(94vw,860px)}
+code{background:#0d1017;border:1px solid var(--line);padding:2px 6px;border-radius:5px;font-size:12px;cursor:pointer}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#1d222b;border:1px solid var(--line);padding:10px 16px;border-radius:10px;display:none;z-index:50}
+a{color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">⚙️ Admin Panel</div>
+  <nav id="tabs"></nav>
+  <div style="flex:1"></div>
+  <span class="mut" id="who"></span>
+  <a href="/"><button class="gh">🛒 Mağaza</button></a>
+</header>
+<main id="view"><div class="card">Yükleniyor…</div></main>
+<div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>
+<div id="toast"></div>
+<script>
+var state = { token: localStorage.getItem('shop_token'), me: null, tab: 'dash', prodId: null };
+function $(s){return document.querySelector(s)}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function toast(m){var t=$('#toast');t.textContent=m;t.style.display='block';setTimeout(function(){t.style.display='none'},2600)}
+function money(n){return Number(n||0).toFixed(2)+'$'}
+
+async function adm(path, opts){
+  opts = opts || {};
+  var r = await fetch('/api/admin/'+path, Object.assign({
+    headers: Object.assign({'Content-Type':'application/json','Authorization':'Bearer '+(state.token||'')}, opts.headers||{})
+  }, opts));
+  var j = {}; try { j = await r.json(); } catch(e){}
+  if (r.status === 401) { location.href = '/'; throw new Error('giriş gerekli'); }
+  if (r.status === 403) { throw new Error('bu hesap admin değil'); }
+  if (!r.ok) throw new Error((j.error && (j.error.message||j.error)) || ('HTTP '+r.status));
+  return j;
+}
+
+var TABS = [
+  ['dash','📊 Panel'],['orders','🧾 Siparişler'],['users','👥 Kullanıcılar'],
+  ['products','📦 Ürünler'],['matches','🧠 Eşleşmeler'],['reservations','⏳ Rezervasyon'],
+  ['keys','🔑 API Anahtarları'],['apilog','📡 API Kayıtlar']
+];
+
+function renderTabs(){
+  $('#tabs').innerHTML = TABS.map(function(t){
+    return '<button data-t="'+t[0]+'" class="'+(state.tab===t[0]?'on':'')+'">'+t[1]+'</button>';
+  }).join('');
+  Array.prototype.forEach.call($('#tabs').children, function(b){
+    b.onclick = function(){ state.tab = b.dataset.t; renderTabs(); views[state.tab](); };
+  });
+}
+
+function closeModal(){ $('#modal').classList.remove('on'); }
+function openSheet(html){ $('#sheet').innerHTML = html; $('#modal').classList.add('on'); }
+
+// ---------------------------------------------------------------- dashboard
+async function vDash(){
+  $('#view').innerHTML = '<div class="card">Yükleniyor…</div>';
+  var d = await adm('stats');
+  $('#view').innerHTML =
+   '<div class="card"><h3 style="margin:0 0 10px">Bugün / Bu Hafta / Toplam</h3><div class="grid">'
+   + stat('📦 Sipariş (bugün)', d.today.orders)
+   + stat('💰 Satış', money(d.today.sales))
+   + stat('📈 Kâr', money(d.today.profit))
+   + stat('📅 Sipariş (7g)', d.week.orders, money(d.week.sales)+' · '+money(d.week.profit))
+   + stat('🗂 Sipariş (tüm zamanlar)', d.all.orders, money(d.all.sales)+' · '+money(d.all.profit))
+   + stat('👥 Kullanıcı', d.users, d.negative_balances+' caride')
+   + '</div></div>'
+   + '<div class="card"><h3 style="margin:0 0 10px">Kuyruklar &amp; API</h3><div class="grid">'
+   + stat('⏳ Bekleyen rezervasyon', d.pending_reservations)
+   + stat('🧠 Onay bekleyen eşleşme', d.pending_matches)
+   + stat('📡 API istek (24s)', d.api.requests_24h, d.api.errors_24h+' hata')
+   + '</div></div>'
+   + '<div class="card"><h3 style="margin:0 0 10px">🏆 En Çok Satan (7 gün)</h3><table>'
+   + (d.top_products.length ? d.top_products.map(function(p){return '<tr><td>'+esc(p.product)+'</td><td>'+p.orders+' sipariş</td><td><b>'+money(p.sales)+'</b></td></tr>'}).join('') : '<tr><td class="mut">kayıt yok</td></tr>')
+   + '</table></div>';
+  function stat(k,v,sub){ return '<div class="stat card" style="margin:0"><b>'+v+'</b><span>'+k+'</span><div class="mut" style="font-size:11px">'+(sub||'')+'</div></div>'; }
+}
+
+// ---------------------------------------------------------------- orders
+async function vOrders(){
+  var q = '';
+  async function draw(qv){
+    $('#view').innerHTML = '<div class="card"><div class="row"><input id="oq" placeholder="ID / kullanıcı ID" value="'+esc(qv)+'"><button class="btn" id="ogo">Ara</button><button class="gh" id="gall">Tümü</button></div><div id="otbl">…</div></div>';
+    $('#ogo').onclick=function(){draw($('#oq').value)}; $('#gall').onclick=function(){draw('')};
+    var d = await adm('orders?limit=100'+(qv?('&q='+encodeURIComponent(qv)):''));
+    $('#otbl').innerHTML = '<table><tr><th>#</th><th>Kullanıcı</th><th>Ürün</th><th>Adet</th><th>Ödeme</th><th>Kâr</th><th>Durum</th><th>Tarih</th><th>Teslim</th></tr>'
+      + d.data.map(function(o){
+        return '<tr><td>'+o.id+'</td><td>'+o.user+(o.username?' <span class="mut">@'+esc(o.username)+'</span>':'')+'</td><td>'+esc(o.product)+'</td><td>'+o.qty+'</td><td>'+money(o.paid)+'</td><td class="'+(o.profit>=0?'ok':'bad')+'">'+money(o.profit)+'</td><td class="'+(o.status==='completed'?'ok':'warn')+'">'+esc(o.status)+(o.source==='dry'?' 🧪':'')+'</td><td class="mut">'+(o.date||'')+'</td><td style="max-width:260px"><code>'+esc((o.delivered||[]).join('\n').slice(0,200))+'</code></td></tr>';
+      }).join('') + '</table>';
+  }
+  draw(q);
+}
+
+// ---------------------------------------------------------------- users
+async function vUsers(){
+  $('#view').innerHTML = '<div class="card"><div class="row"><input id="uq" placeholder="ID veya @username ara"><button class="btn" id="ugo">Ara</button><button class="gh" id="urec">Son eklenenler</button></div><div id="utbl">…</div></div>';
+  async function draw(q){
+    var d = await adm('users?q='+encodeURIComponent(q||''));
+    $('#utbl').innerHTML = '<table><tr><th>ID</th><th>Kullanıcı</th><th>Bakiye</th><th>Alışveriş</th><th>İşlem</th></tr>'
+      + d.data.map(function(u){
+        return '<tr><td>'+u.id+'</td><td><b>'+esc(u.username?('@'+u.username):(u.first_name||''))+'</b></td><td class="'+(u.balance<0?'bad':(u.balance>0?'ok':'mut'))+'"><b>'+money(u.balance)+'</b>'+(u.balance<0?' <span class="bad">caride</span>':'')+'</td><td>'+u.total_purchases+'</td><td><button class="gh" onclick="balModal('+u.id+',\''+esc(u.username||u.first_name||'')+'\','+u.balance+')">± Bakiye</button></td></tr>';
+      }).join('') + '</table>';
+  }
+  window.balModal = function(id, name, cur){
+    openSheet('<h3>💼 Bakiye — @'+esc(name)+' <span class="mut">('+id+')</span></h3>'
+     +'<p class="mut">Mevcut: <b>'+money(cur)+'</b> · Negatif değer = cari (borç). Bot ile aynı kural.</p>'
+     +'<div class="row"><input id="bam" placeholder="+10 / 5,5 / -10"><button class="btn" id="bag">Uygula</button><button class="gh" onclick="closeModal()">Kapat</button></div>'
+     +'<div id="bres"></div>');
+    $('#bag').onclick = async function(){
+      try{
+        var r = await adm('users/'+id+'/balance', {method:'POST', body:JSON.stringify({amount:$('#bam').value})});
+        $('#bres').innerHTML = '<p class="ok">✅ Yeni bakiye: <b>'+money(r.new_balance)+'</b></p>';
+        draw($('#uq').value);
+      }catch(e){ $('#bres').innerHTML = '<p class="bad">❌ '+esc(e.message)+'</p>'; }
+    };
+  };
+  $('#ugo').onclick=function(){draw($('#uq').value)};
+  $('#urec').onclick=function(){draw('')};
+  draw('');
+}
+
+// ---------------------------------------------------------------- products
+async function vProducts(){
+  var d = await adm('products');
+  $('#view').innerHTML = '<div class="card"><table><tr><th>ID</th><th>Ürün</th><th>Sınıf</th><th>Mod</th><th>Fiyat</th><th>Marj</th><th>Link</th><th>Durum</th><th></th></tr>'
+   + d.data.map(function(p){
+     var w = p.warranty==='guaranteed'?'<span class="pill ok">🛡 garantili</span>':(p.warranty==='instant'?'<span class="pill warn">⚡ anlık</span>':'<span class="pill mut">🧩 klasik</span>');
+     return '<tr><td>'+p.id+'</td><td>'+esc(p.name)+'</td><td>'+w+'</td><td class="mut">'+esc(p.pricing_mode)+'</td><td>'+money(p.price)+'</td><td>'+(p.margin!=null?'%'+p.margin:'-')+'</td><td>'+p.links+'</td><td>'+(p.active?'<span class="ok">🟢</span>':'<span class="bad">🔴</span>')+'</td><td><button class="btn" onclick="prodDetail('+p.id+')">Düzenle</button></td></tr>';
+   }).join('') + '</table></div>';
+}
+
+window.prodDetail = async function(pid){
+  var p = await adm('products/'+pid+'/offers');
+  var links = await adm('products/'+pid+'/links');
+  var sup = await adm('suppliers');
+  openSheet(
+    '<h3>📦 #'+pid+' — '+esc(p.services.length?(''): '')+esc((p.display_unit!=null?('· birim '+money(p.display_unit)):''))+'</h3>'
+    +'<div id="pdHead"></div>'
+    +'<div class="row"><select id="pdWarranty"><option value="none"'+(p.warranty==='none'?' selected':'')+'>🧩 Klasik (filtre yok)</option><option value="guaranteed"'+(p.warranty==='guaranteed'?' selected':'')+'>🛡 Garantili</option><option value="instant"'+(p.warranty==='instant'?' selected':'')+'>⚡ Anlık</option></select>'
+    +'<select id="pdMode"><option value="manual"'+(p.mode==='manual'?' selected':'')+'>manuel</option><option value="max_profit"'+(p.mode==='max_profit'?' selected':'')+'>maks. kâr</option><option value="cheapest"'+(p.mode==='cheapest'?' selected':'')+'>en ucuz</option></select>'
+    +'<input id="pdPrice" style="width:90px" placeholder="fiyat" value="'+(p.display_unit!=null?p.display_unit:'')+'">'
+    +'<button class="btn" id="pdSave">Kaydet</button><button class="gh" onclick="closeModal()">Kapat</button></div>'
+    +'<h4>🔗 Tedarikçi Bağlantıları</h4><div id="pdLinks"></div>'
+    +'<div class="row"><select id="pdSup">'+sup.data.map(function(s){return '<option value="'+s.id+'">'+esc(s.name)+'</option>'}).join('')+'</select><input id="pdQ" placeholder="katalogda ara…"><button class="gh" id="pdSearch">Katalog Getir</button></div><div id="pdCat" class="mut"></div>'
+    +'<h4>🧮 Canlı Teklifler (PricingEngine)</h4><div id="pdOff"></div>');
+  $('#pdHead').innerHTML = '<p class="mut">Garanti sınıfı: '+(p.sold_out?'<span class="bad">🔴 şu an teslim edilemiyor</span>':'<span class="ok">🟢 sunulabilir</span>')+'</p>';
+  async function drawLinks(){
+    var l2 = await adm('products/'+pid+'/links');
+    $('#pdLinks').innerHTML = '<table><tr><th>ID</th><th>Tedarikçi</th><th>Servis</th><th>Öncelik</th><th>Marj</th><th>Taban</th><th>Sınıf</th><th>Son</th><th>Durum</th><th></th></tr>'
+     + l2.data.map(function(l){
+       return '<tr><td>'+l.id+'</td><td>'+esc(l.supplier)+'</td><td><code>'+esc(l.remote_service_id)+'</code></td><td>'+l.priority+'</td><td>'+(l.margin!=null?l.margin:'-')+'</td><td>'+(l.floor!=null?l.floor:'-')+'</td><td>'+(l.warranty==='auto'?'auto':l.warranty)+'</td><td class="mut">'+(l.last_price!=null?'$'+l.last_price+' / '+l.last_stock:'?')+'</td><td>'+(l.enabled?'<span class="ok">🟢</span>':'<span class="bad">🔴</span>')+'</td>'
+       +'<td><button class="gh" onclick="toggleLink('+l.id+','+(l.enabled?0:1)+')">Toggle</button> <button class="danger" onclick="delLink('+l.id+')">Sil</button></td></tr>';
+     }).join('')+'</table>';
+  }
+  window.toggleLink = async function(id, en){ await adm('links/'+id,{method:'PATCH',body:JSON.stringify({enabled:!!en})}); drawLinks(); };
+  window.delLink = async function(id){ if(!confirm('bağlantı silinsin mi?'))return; await adm('links/'+id,{method:'DELETE'}); drawLinks(); };
+  $('#pdSave').onclick = async function(){
+    try{
+      await adm('products/'+pid, {method:'PATCH', body:JSON.stringify({
+        warranty:$('#pdWarranty').value, pricing_mode:$('#pdMode').value, price:Number($('#pdPrice').value)||undefined
+      })});
+      toast('kaydedildi ✅'); prodDetail(pid);
+    }catch(e){toast('hata: '+e.message)}
+  };
+  $('#pdSearch').onclick = async function(){
+    var sid = $('#pdSup').value;
+    $('#pdCat').innerHTML = '…';
+    try{
+      var c = await adm('catalog/'+sid+'?q='+encodeURIComponent($('#pdQ').value||'')+'&limit=30');
+      $('#pdCat').innerHTML = '<table><tr><th>Servis</th><th>Ad</th><th>Fiyat</th><th>Stok</th><th>Sınıf</th><th></th></tr>'
+       + c.data.map(function(r){
+         return '<tr><td><code>'+esc(r.remote_service_id)+'</code></td><td>'+esc(r.name)+'</td><td>'+(r.price_usd!=null?'$'+r.price_usd:'?')+'</td><td>'+(r.stock!=null?r.stock:'?')+'</td><td>'+(r.warranty==='guaranteed'?'🛡':(r.warranty==='instant'?'⚡':'·'))+'</td><td><button class="gh" onclick="bindLink('+pid+',\''+sid+'\',\''+esc(r.remote_service_id)+'\')">+ Bağla</button></td></tr>';
+       }).join('')+'</table>';
+    }catch(e){ $('#pdCat').innerHTML = '<span class="bad">'+esc(e.message)+'</span>'; }
+  };
+  window.bindLink = async function(pid, sid, rid){
+    try{
+      await adm('products/'+pid+'/links',{method:'POST',body:JSON.stringify({supplier_id:Number(sid),remote_service_id:rid})});
+      toast('bağlandı ✅'); drawLinks();
+    }catch(e){toast(e.message)}
+  };
+  $('#pdOff').innerHTML = '<table><tr><th>#</th><th>Tedarikçi</th><th>Servis</th><th>Maliyet</th><th>Satış</th><th>Stok</th><th>Sınıf</th><th>Durum</th></tr>'
+   + p.services.map(function(o){
+     return '<tr><td>'+o.service_id+'</td><td>'+esc(o.supplier)+'</td><td>'+esc(o.name)+'</td><td>'+money(o.cost)+'</td><td>'+money(o.sell)+'</td><td>'+o.stock+'</td><td>'+(o.warranty_class==='guaranteed'?'🛡':(o.warranty_class==='instant'?'⚡':'·'))+'</td><td>'+(o.affordable?'<span class="ok">✅</span>':'<span class="bad">'+esc(o.reason||'')+'</span>')+'</td></tr>';
+   }).join('')+'</table>';
+  drawLinks();
+};
+
+// ---------------------------------------------------------------- matches
+async function vMatches(){
+  $('#view').innerHTML='<div class="card">…</div>';
+  var d = await adm('matches');
+  $('#view').innerHTML = '<div class="card"><h3 style="margin:0 0 10px">🧠 Eşleşme Onay Kuyruğu</h3><table><tr><th>#</th><th>Tedarikçi</th><th>Servis</th><th>Skor</th><th>Aday Ürün</th><th></th></tr>'
+   + (d.data.length?d.data.map(function(r){
+     return '<tr><td>'+r.id+'</td><td>'+esc(r.supplier)+'</td><td><code>'+esc(r.remote_service_id)+'</code></td><td>'+Math.round(r.score*100)+'%</td><td>'+esc(r.product||'—')+'</td>'
+      +'<td><button class="gh" onclick="mtch('+r.id+',\'approve\')">Onayla</button> <button class="danger" onclick="mtch('+r.id+',\'reject\')">Ret</button></td></tr>';
+   }).join(''):'<tr><td colspan="6" class="mut">kuyruk boş</td></tr>') + '</table></div>';
+  window.mtch = async function(id, act){
+    try{ await adm('matches/'+id+'/'+act,{method:'POST'}); toast(act==='approve'?'onaylandı ✅':'reddedildi'); vMatches(); }
+    catch(e){ toast(e.message); }
+  };
+}
+
+// ---------------------------------------------------------------- reservations
+async function vReservations(){
+  $('#view').innerHTML='<div class="card">…</div>';
+  var d = await adm('reservations');
+  $('#view').innerHTML = '<div class="card"><h3 style="margin:0 0 10px">⏳ Bekleyen Rezervasyonlar (iptal/tamamlama bot üzerinden)</h3><table><tr><th>#</th><th>Kullanıcı</th><th>Ürün</th><th>Adet</th><th>Karşılanan</th><th>Ödenen</th><th>Tarih</th></tr>'
+   + (d.data.length?d.data.map(function(r){return '<tr><td>'+r.id+'</td><td>'+r.user+'</td><td>'+esc(r.product)+'</td><td>'+r.qty+'</td><td>'+r.fulfilled+'</td><td>'+money(r.paid)+'</td><td class="mut">'+(r.date||'')+'</td></tr>'}).join(''):'<tr><td colspan="7" class="mut">yok</td></tr>')
+   + '</table></div>';
+}
+
+// ---------------------------------------------------------------- api keys
+async function vKeys(){
+  $('#view').innerHTML='<div class="card">…</div>';
+  var d = await adm('keys');
+  $('#view').innerHTML =
+    '<div class="card"><h3 style="margin:0 0 10px">🔑 API Anahtarları</h3>'
+   +'<div class="row"><input id="kn" placeholder="anahtar adı"><select id="ku"><option value="">— kullanıcı bağlama —</option></select>'
+   +'<input id="kr" style="width:70px" placeholder="rpm" value="120"><input id="kd" style="width:80px" placeholder="günlük (ops)">'
+   +'<input id="kw" style="flex:1;min-width:160px" placeholder="webhook url (ops)"><button class="btn" id="kc">+ Anahtar Üret</button></div>'
+   +'<div id="knew"></div>'
+   +'<table><tr><th>#</th><th>Ad</th><th>Anahtar</th><th>Kapsam</th><th>RPM</th><th>Günlük</th><th>Hesap</th><th>Webhook</th><th>Son Kullanım</th><th>Durum</th><th></th></tr>'
+   + d.data.map(function(k){
+     return '<tr><td>'+k.id+'</td><td>'+esc(k.name)+'</td><td><code>'+esc(k.key_preview)+'…</code></td><td class="mut" style="font-size:11px">'+k.scopes.map(esc).join(', ')+'</td><td>'+k.rate_limit_per_min+'</td><td>'+(k.daily_limit||'∞')+'</td><td>'+(k.user_id||'—')+'</td><td>'+(k.webhook_configured?'🔔':'—')+'</td><td class="mut">'+(k.last_used_at||'—')+'</td><td>'+(k.enabled?'<span class="ok">🟢</span>':'<span class="bad">🔴</span>')+'</td>'
+     +'<td><button class="gh" onclick="keyToggle('+k.id+','+(k.enabled?0:1)+')">'+(k.enabled?'Dondur':'Aktifle')+'</button> <button class="danger" onclick="keyDel('+k.id+')">Sil</button></td></tr>';
+   }).join('') + '</table></div>';
+  // user list for binding
+  try{ var us = await adm('users'); var sel=$('#ku');
+    us.data.slice(0,50).forEach(function(u){ var o=document.createElement('option'); o.value=u.id; o.textContent='#'+u.id+(u.username?' @'+u.username:''); sel.appendChild(o); });
+  }catch(e){}
+  $('#kc').onclick = async function(){
+    if(!$('#kn').value.trim()) return toast('ad ver');
+    try{
+      var r = await adm('keys',{method:'POST',body:JSON.stringify({
+        name:$('#kn').value.trim(), user_id:$('#ku').value?Number($('#ku').value):null,
+        rate_limit_per_min:Number($('#kr').value)||120, daily_limit:$('#kd').value?Number($('#kd').value):null,
+        webhook_url:$('#kw').value.trim()||null
+      })});
+      $('#knew').innerHTML = '<p class="warn">⚠️ Anahtar YALNIZCA BİR KEZ gösterilir — şimdi kopyala:</p>'
+        +'<code style="font-size:15px;display:block;padding:10px;user-select:all" onclick="navigator.clipboard&&navigator.clipboard.writeText(this.textContent);toast(\'kopyalandı\')">'+esc(r.data.raw_key)+'</code>'
+        +(r.data.webhook_secret?'<p class="mut">webhook HMAC secret: <code>'+esc(r.data.webhook_secret)+'</code></p>':'');
+      $('#kn').value='';
+    }catch(e){ toast(e.message); }
+  };
+  window.keyToggle = async function(id,en){ await adm('keys/'+id,{method:'PATCH',body:JSON.stringify({enabled:!!en})}); vKeys(); };
+  window.keyDel = async function(id){ if(!confirm('silinsin mi? imzalanan anahtar hemen geçersiz olur'))return; await adm('keys/'+id,{method:'DELETE'}); vKeys(); };
+}
+
+// ---------------------------------------------------------------- api log
+async function vApilog(errors){
+  var d = await adm('apilog?limit=80'+(errors?'&errors=1':''));
+  $('#view').innerHTML =
+    '<div class="card"><div class="row"><button class="gh" onclick="vApilogBtn()">🔄 Tümü</button><button class="gh" onclick="vApilogErr()">Sadece hatalar</button></div>'
+   +'<h3 style="margin:0 0 10px">📡 Son API İstekleri</h3><table><tr><th>Ts</th><th>Key</th><th>Yöntem</th><th>Yol</th><th>Statü</th><th>Kod</th><th>IP</th><th>ms</th></tr>'
+   + (d.data.length?d.data.map(function(r){
+     return '<tr><td class="mut">'+r.ts+'</td><td>'+(r.key_id||'—')+'</td><td>'+r.method+'</td><td><code>'+esc(r.route)+'</code></td><td class="'+(r.status>=400?'bad':'ok')+'">'+r.status+'</td><td class="mut">'+esc(r.code||'')+'</td><td class="mut">'+esc(r.ip||'')+'</td><td>'+(r.ms||'')+'</td></tr>';
+   }).join(''):'<tr><td colspan="8" class="mut">kayıt yok</td></tr>')+'</table></div>'
+   +'<div class="card"><h3 style="margin:0 0 10px">🔔 Son Webhook Denemeleri</h3><table><tr><th>Ts</th><th>Event</th><th>URL</th><th>Sonuç</th><th>Hata</th></tr>'
+   + (d.webhooks.length?d.webhooks.map(function(r){return '<tr><td class="mut">'+r.ts+'</td><td>'+esc(r.event)+'</td><td><code>'+esc(r.url)+'</code></td><td class="'+(r.ok?'ok':'bad')+'">'+(r.ok?'✅':'❌')+'</td><td class="mut">'+esc(r.error||'')+'</td></tr>'}).join(''):'<tr><td colspan="5" class="mut">deneme yok</td></tr>')
+   +'</table></div>';
+}
+window.vApilogBtn = function(){ vApilog(false); };
+window.vApilogErr = function(){ vApilog(true); };
+
+var views = { dash:vDash, orders:vOrders, users:vUsers, products:vProducts, matches:vMatches, reservations:vReservations, keys:vKeys, apilog:vApilog };
+
+async function boot(){
+  if(!state.token){ location.href='/'; return; }
+  try { state.me = await (await fetch('/api/me',{headers:{Authorization:'Bearer '+state.token}})).json(); }
+  catch(e){ location.href='/'; return; }
+  if (state.me && state.me.is_admin) {
+    $('#who').textContent = '@'+(state.me.username||state.me.id);
+    renderTabs(); views[state.tab]();
+  } else {
+    $('#view').innerHTML = '<div class="card"><h3>⛔ Yetkisiz</h3><p>Bu oturum admin hesabı (ADMIN_ID) değil. <a href="/">Mağazaya dön</a></p></div>';
+  }
+}
+document.addEventListener('click', function(e){ if(e.target.classList.contains('modal')) closeModal(); });
+$('#modal').addEventListener('click', function(e){ if(e.target === this) closeModal(); });
+boot();
+</script>
+</body>
+</html>

@@ -51,6 +51,12 @@ module.exports = {
   WEB_ENABLED: ['1', 'true', 'yes'].includes(String(process.env.WEB_ENABLED || '1').toLowerCase()),
   WEB_PORT: parseInt(process.env.WEB_PORT, 10) || 3000,
 
+  // ---- Public REST API (bot-api.developer.org.tr) ----
+  API_ENABLED: ['1', 'true', 'yes'].includes(String(process.env.API_ENABLED || '1').toLowerCase()),
+  API_PORT: parseInt(process.env.API_PORT, 10) || 3100,
+  API_CORS_ORIGIN: process.env.API_CORS_ORIGIN || '*',          // production: exact https origin(s), comma sep
+  API_DEFAULT_RPM: parseInt(process.env.API_DEFAULT_RPM, 10) || 120, // default key rate (req/min)
+
   // ---- Safety switch: when truthy, no write order is ever sent to a supplier ----
   SUPPLIER_DRY_RUN: ['1', 'true', 'yes'].includes(String(process.env.SUPPLIER_DRY_RUN || '').toLowerCase())
 };

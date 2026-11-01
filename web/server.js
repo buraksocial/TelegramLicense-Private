@@ -32,6 +32,7 @@ const { t } = require('../src/utils/i18n');
 const { parseQuantity, parseMoney } = require('../src/utils/money');
 const { checkTransaction } = require('../src/services/binance');
 const { WEB_PORT, WEB_ENABLED, ADMIN_ID, BOT_TOKEN } = require('../src/config/env');
+const { handleAdmin } = require('./admin');
 
 const TOKEN_TTL_MS = 7 * 24 * 3600 * 1000;
 const SESSIONS = new Map(); // token -> { user_id, expires }
@@ -123,6 +124,12 @@ function publicProduct(p, lang) {
 async function handleApi(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean); // ['api', ...]
   const route = seg.slice(1).join('/');
+
+  // ---- admin panel surface (same widget session, ADMIN_ID only) ----
+  if (url.pathname.startsWith('/api/admin/')) {
+    const asess = auth(req);
+    return handleAdmin(req, res, url, asess);
+  }
 
   // ---- login (no auth) ----
   if (route === 'config') {
@@ -246,7 +253,8 @@ async function handleApi(req, res, url) {
       username: user.username || null,
       balance: round2(user.balance || 0),
       total_purchases: user.total_purchases || 0,
-      lang
+      lang,
+      is_admin: user.id === ADMIN_ID
     });
   }
 
@@ -312,15 +320,20 @@ async function handleApi(req, res, url) {
         const bal = round2(user.balance || 0);
         if (bal < total) return json(res, 402, { error: `bakiye yetersiz (bakiye: ${bal}$, gereken: ${total}$)` });
         db.prepare('UPDATE users SET balance = balance - ? WHERE id = ?').run(total, userId);
-        result = await CS.fulfill(userId, product, qty, {
-          paidAmount: total,
-          unitBase,
-          chosenPs: lock ? lock.psId : null,
-          txid,
-          isReservation: !!body.reserve,
-          trueMissing: body.reserve ? qty : undefined,
-          source: 'web'
-        });
+        try {
+          result = await CS.fulfill(userId, product, qty, {
+            paidAmount: total,
+            unitBase,
+            chosenPs: lock ? lock.psId : null,
+            txid,
+            isReservation: !!body.reserve,
+            trueMissing: body.reserve ? qty : undefined,
+            source: 'web'
+          });
+        } catch (e) {
+          db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(total, userId); // refund on failure
+          throw e;
+        }
       } else if (pay === 'binance') {
         const givenTx = String(body.txid || '').trim();
         if (!givenTx) return json(res, 400, { error: 'txid gerekli' });
@@ -406,6 +419,7 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 function serveStatic(req, res, url) {
   const pub = path.join(__dirname, 'public');
   let file = url.pathname === '/' ? '/index.html' : url.pathname;
+  if (url.pathname === '/admin') file = '/admin.html';
   file = path.normalize(file).replace(/\\/g, '/');
   const full = path.join(pub, file);
   if (!full.startsWith(pub)) { res.writeHead(403); return res.end(); }

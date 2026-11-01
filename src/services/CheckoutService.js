@@ -206,7 +206,7 @@ async function fulfill(userId, product, qty, opts) {
       .run(userId, product.id, qty, costUsd, paidAmount, profitUsd,
         costUsd * qty * tryRate, paidAmount * tryRate, profitUsd * tryRate);
     db.prepare('UPDATE users SET total_purchases = total_purchases + ? WHERE id = ?').run(qty, userId);
-    return { kind: 'reservation', qty, reserveUnitPrice };
+    return { kind: 'reservation', order_id: db.prepare('SELECT last_insert_rowid() id').get().id, qty, reserveUnitPrice };
   }
 
   // ---- ensure stock: local + restock/dynamic-direct ----
@@ -289,6 +289,7 @@ async function fulfill(userId, product, qty, opts) {
 
   return {
     kind: 'delivered',
+    order_id: db.prepare('SELECT last_insert_rowid() id').get().id,
     qty,
     delivered: deliveredData,
     orderProvenance: supplierProvenance,

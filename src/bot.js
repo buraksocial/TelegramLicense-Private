@@ -54,6 +54,10 @@ TranslationService.start(bot);
 try { require('../web/server').startWebServer(); }
 catch (e) { console.error('[Web] başlatılamadı:', e.message); }
 
+// Public REST API (bot-api.developer.org.tr) — ayrı port, kendi ratelimit katmanları
+try { require('../api/server').startApiServer(); }
+catch (e) { console.error('[Api] başlatılamadı:', e.message); }
+
 const userBotManager = require('./services/UserBotManager');
 userBotManager.init().catch(err => console.error('UserBot init error:', err));
 
