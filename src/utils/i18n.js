@@ -26,6 +26,12 @@ const locales = {
     menu_choose_action: "👋 Please choose an action:",
     no_active_products: "No active products at the moment.",
     products_list_msg: "🛒 <b>Our Products:</b>\nSelect the product you want to buy:",
+    menu_choose_category: "🗂 <b>Choose a category:</b>",
+    badge_sold_out: "🔴 sold out",
+    btn_all_products: "📋 All products",
+    btn_back_products: "🔙 Products",
+    btn_best_offer: "⭐ Buy best offer",
+    sold_out_hint: "supplier balance/stock is insufficient. You can reserve without paying now.",
     btn_main_menu: "🔙 Main Menu",
     profile_msg: "👤 <b>Your Profile:</b>\n\nID: <code>{id}</code>\nSuccessful Purchases: {purchases}",
     profile_title: "👤 <b>Your Profile Details</b>",
@@ -92,7 +98,9 @@ const locales = {
     my_reservations_title: "⏳ <b>Your Reservations</b>\nSelect a reservation to view its details:",
     order_detail: "📦 <b>Order Details</b>\n\nProduct: {name}\nQuantity: {qty}\nDate: {date}\n\n<b>Delivered Data:</b>\n{data}",
     reservation_detail: "⏳ <b>Reservation Details</b>\n\nProduct: {name}\nStatus: {status}\nFulfilled: {fulfilled}/{qty}\nDate: {date}\n\n<b>Delivered Data:</b>\n{data}",
-    // Admin\n    admin_welcome: "👨‍💻 <b>Welcome to Admin Panel!</b>\nPlease choose an action:\n\n<i>Use /listproducts to see product IDs.</i>",
+    // Admin
+    admin_welcome: "👨‍💻 <b>Welcome to Admin Panel!</b>\nPlease choose an action:\n\n<i>Use /listproducts to see product IDs.</i>",
+    admin_settings: "🛠 General Settings",
     admin_add_product: "📦 Add New Product",
     admin_add_stock: "➕ Add Stock",
     admin_pricing_groups: "🏢 Pricing Groups",
@@ -143,6 +151,12 @@ const locales = {
     menu_choose_action: "👋 Lütfen bir işlem seçiniz:",
     no_active_products: "Şu anda aktif ürün bulunmamaktadır.",
     products_list_msg: "🛒 <b>Ürünlerimiz:</b>\nSatın almak istediğiniz ürünü seçin:",
+    menu_choose_category: "🗂 <b>Kategori seçin:</b>",
+    badge_sold_out: "🔴 tükendi",
+    btn_all_products: "📋 Tümü",
+    btn_back_products: "🔙 Ürünler",
+    btn_best_offer: "⭐ En iyi teklif ile al",
+    sold_out_hint: "tedarikçi bakiyesi/stok yetersiz. Ödeme yapmadan rezerve edebilirsiniz.",
     btn_main_menu: "🔙 Ana Menü",
     profile_msg: "👤 <b>Profil Bilgileriniz:</b>\n\nID: <code>{id}</code>\nBaşarılı Satın Alım: {purchases}",
     profile_title: "👤 <b>Profil Bilgileriniz</b>",
@@ -209,7 +223,9 @@ const locales = {
     my_reservations_title: "⏳ <b>Rezervasyonlarınız</b>\nDetaylarını görmek için bir rezervasyon seçin:",
     order_detail: "📦 <b>Sipariş Detayları</b>\n\nÜrün: {name}\nAdet: {qty}\nTarih: {date}\n\n<b>Teslim Edilen Veri:</b>\n{data}",
     reservation_detail: "⏳ <b>Rezervasyon Detayları</b>\n\nÜrün: {name}\nDurum: {status}\nTeslim Edilen: {fulfilled}/{qty}\nTarih: {date}\n\n<b>Teslim Edilen Veri:</b>\n{data}",
-    // Admin\n    admin_welcome: "👨‍💻 <b>Admin Paneline Hoş Geldiniz!</b>\nLütfen yapmak istediğiniz işlemi seçin:\n\n<i>/listproducts komutu ile ürün ID'lerini görebilirsiniz.</i>",
+        // Admin
+    admin_welcome: "👨‍💻 <b>Admin Paneline Hoş Geldiniz!</b>\nLütfen yapmak istediğiniz işlemi seçin:\n\n<i>/listproducts komutu ile ürün ID'lerini görebilirsiniz.</i>",
+    admin_settings: "🛠 Genel Ayarlar",
     admin_add_product: "📦 Yeni Ürün Ekle",
     admin_add_stock: "➕ Stok Ekle",
     admin_pricing_groups: "🏢 Fiyat Grupları Yönetimi",
@@ -810,8 +826,28 @@ const locales = {
   }
 };
 
+// DB overrides (translated UI strings for added languages) — lazy + cached.
+let overrides = null;
+let overridesLoadedAt = 0;
+function getOverride(lang, key) {
+  const now = Date.now();
+  if (!overrides || now - overridesLoadedAt > 60000) {
+    try {
+      const { db } = require('../db');
+      overrides = new Map();
+      for (const r of db.prepare('SELECT lang, key, value FROM i18n_overrides').all()) {
+        overrides.set(`${r.lang}:${r.key}`, r.value);
+      }
+      overridesLoadedAt = now;
+    } catch (e) {
+      overrides = overrides || new Map(); // db not ready yet; keep old cache
+    }
+  }
+  return overrides.get(`${lang}:${key}`);
+}
+
 function t(lang, key, params = {}) {
-  let text = locales[lang]?.[key] || locales['en'][key] || key;
+  let text = getOverride(lang, key) || locales[lang]?.[key] || locales['en'][key] || key;
   for (const [k, v] of Object.entries(params)) {
     text = text.replace(new RegExp(`{${k}}`, 'g'), v);
   }

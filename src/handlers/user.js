@@ -35,26 +35,27 @@ function getReservationFee(userId) {
   return feeRow ? parseFloat(feeRow.value) : 0.10;
 }
 
-function getUserUnitPrice(userId, product) {
+function getUserUnitPrice(userId, product, baseUnitOverride = null) {
   // 1. Check Pricing Group
   const userGroup = db.prepare('SELECT g.id, g.discount_percent FROM user_pricing_groups u JOIN pricing_groups g ON u.group_id = g.id WHERE u.user_id = ?').get(userId);
   if (userGroup) {
     const groupProduct = db.prepare('SELECT price FROM pricing_group_products WHERE group_id = ? AND product_id = ?').get(userGroup.id, product.id);
     if (groupProduct) return groupProduct.price;
-    if (userGroup.discount_percent > 0) return product.price * (1 - (userGroup.discount_percent / 100));
-    return product.price; // If group has no specific product or discount, return original
+    const base = baseUnitOverride !== null ? baseUnitOverride : product.price;
+    if (userGroup.discount_percent > 0) return base * (1 - (userGroup.discount_percent / 100));
+    return base; // If group has no specific product or discount, return original
   }
 
   // 2. Check Rank
   const rank = getUserRank(userId);
-  let price = product.price;
+  let price = baseUnitOverride !== null ? baseUnitOverride : product.price;
 
   if (rank) {
     const rankProduct = db.prepare('SELECT special_price FROM rank_special_prices WHERE rank_id = ? AND product_id = ?').get(rank.id, product.id);
     if (rankProduct) {
       price = rankProduct.special_price;
     } else if (rank.discount_percent > 0) {
-      price = product.price * (1 - (rank.discount_percent / 100));
+      price = price * (1 - (rank.discount_percent / 100));
     }
   }
 
@@ -82,8 +83,8 @@ function getUserUnitPrice(userId, product) {
   return price;
 }
 
-function calculateTotalPrice(userId, product, qty) {
-  let unitPrice = getUserUnitPrice(userId, product);
+function calculateTotalPrice(userId, product, qty, baseUnitOverride = null) {
+  let unitPrice = getUserUnitPrice(userId, product, baseUnitOverride);
 
   // Bulk discounts apply only if no custom pricing group and no rank override?
   // User didn't specify bulk discounts relation to Rank. I'll keep bulk discounts on top of unitPrice if they don't have a group.
@@ -148,38 +149,6 @@ function setupUserHandlers(bot) {
     }
   });
 
-  bot.action('menu_products', async (ctx) => {
-    const lang = getUserLang(ctx.from.id);
-    const products = db.prepare('SELECT * FROM products WHERE is_active = 1').all();
-
-    if (products.length === 0) {
-      return ctx.answerCbQuery(t(lang, 'no_active_products'), { show_alert: true });
-    }
-
-    const buttons = products.map(p => {
-      const stockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(p.id).count;
-      const localizedName = getProductName(p, lang);
-      let displayPrice = getUserUnitPrice(ctx.from.id, p);
-      let btnText = '';
-      if (stockCount === 0) {
-        const reservePrice = displayPrice * 1.10;
-        btnText = `${localizedName} - ${reservePrice.toFixed(2)}$ ${t(lang, 'reserve_btn_label')}`;
-      } else {
-        btnText = `${localizedName} - ${displayPrice.toFixed(2)}$ (${t(lang, 'stock_lbl')}: ${stockCount})`;
-      }
-      return [{ text: btnText, callback_data: `buy_${p.id}` }];
-    });
-
-    ctx.editMessageText(t(lang, 'products_list_msg'), {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [
-          ...buttons,
-          [{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]
-        ]
-      }
-    });
-  });
 
   bot.action('main_menu', async (ctx) => {
     const lang = getUserLang(ctx.from.id);
@@ -251,14 +220,14 @@ function setupUserHandlers(bot) {
     const limit = 5;
     const offset = (page - 1) * limit;
 
-    const totalCountRow = db.prepare('SELECT COUNT(*) as count FROM orders WHERE user_id = ?').get(ctx.from.id);
+    const totalCountRow = db.prepare("SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND (status IS NULL OR status != 'cancelled')").get(ctx.from.id);
     const totalCount = totalCountRow ? totalCountRow.count : 0;
 
     if (totalCount === 0) {
       return ctx.answerCbQuery(t(lang, 'no_past_orders') || 'No past orders found.', { show_alert: true });
     }
 
-    const orders = db.prepare('SELECT o.id, p.name, o.qty, o.created_at FROM orders o JOIN products p ON o.product_id = p.id WHERE o.user_id = ? ORDER BY o.id DESC LIMIT ? OFFSET ?').all(ctx.from.id, limit, offset);
+    const orders = db.prepare("SELECT o.id, p.name, o.qty, o.created_at FROM orders o JOIN products p ON o.product_id = p.id WHERE o.user_id = ? AND (o.status IS NULL OR o.status != 'cancelled') ORDER BY o.id DESC LIMIT ? OFFSET ?").all(ctx.from.id, limit, offset);
 
     const buttons = orders.map(o => {
       let prodName = "";
@@ -532,6 +501,143 @@ function setupUserHandlers(bot) {
   });
 
   // Ürün Seçildi -> Adet Sor
+  // ================= DYNAMIC CATALOGUE FLOW (kategori → ürün → servis → adet)
+  const { PricingEngine } = require('../services/PricingEngine');
+  const { PRICE_LOCK_TTL_MS } = require('../constants');
+  const crypto = require('crypto');
+
+  function categoryName(cat, lang) {
+    try {
+      const j = JSON.parse(cat.name_json || '{}');
+      return j[lang] || j.en || cat.slug;
+    } catch (e) { return cat.slug; }
+  }
+
+  function issuePriceLock(ctx, product, decision, baseUnit) {
+    const token = crypto.randomBytes(8).toString('hex');
+    db.prepare('DELETE FROM price_locks WHERE expires_at < CURRENT_TIMESTAMP').run();
+    db.prepare(`
+      INSERT INTO price_locks (token, product_id, product_supplier_id, supplier_id, unit_price, expires_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now', ?))
+    `).run(token, product.id,
+      decision.fulfillOffer ? decision.fulfillOffer.product_supplier_id : null,
+      decision.fulfillOffer ? decision.fulfillOffer.supplier_id : null,
+      baseUnit, `+${Math.round(PRICE_LOCK_TTL_MS / 1000)} seconds`);
+    return token;
+  }
+
+  function readPriceLock(token) {
+    if (!token) return null;
+    return db.prepare("SELECT * FROM price_locks WHERE token = ? AND expires_at > datetime('now')").get(token) || null;
+  }
+
+  // Step 1: categories (falls back to a flat product list when none defined)
+  bot.action('menu_products', async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    const cats = db.prepare('SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order, id').all();
+
+    if (cats.length === 0) return showProductsForCategory(ctx, lang, 0);
+
+    const rows = [];
+    for (let i = 0; i < cats.length; i += 2) {
+      const row = cats.slice(i, i + 2).map((c) => {
+        const count = db.prepare(
+          `SELECT COUNT(*) c FROM products p
+           JOIN product_categories pc ON pc.product_id = p.id
+           WHERE pc.category_id = ? AND p.is_active = 1`
+        ).get(c.id).c;
+        return { text: `${c.emoji || '📂'} ${categoryName(c, lang)} (${count})`, callback_data: `cat_${c.id}` };
+      });
+      rows.push(row);
+    }
+    rows.push([{ text: t(lang, 'btn_all_products') || '📋 Tümü', callback_data: 'cat_0' }]);
+    rows.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
+
+    return ctx.editMessageText(t(lang, 'menu_choose_category') || '🗂 <b>Kategori seçin:</b>', {
+      parse_mode: 'HTML', reply_markup: { inline_keyboard: rows }
+    }).catch(() => {});
+  });
+
+  bot.action(/^cat_(\d+)$/, async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    const catId = parseInt(ctx.match[1], 10);
+    await showProductsForCategory(ctx, lang, catId);
+  });
+
+  async function showProductsForCategory(ctx, lang, catId) {
+    let products;
+    if (catId > 0) {
+      products = db.prepare(
+        `SELECT p.* FROM products p JOIN product_categories pc ON pc.product_id = p.id
+         WHERE p.is_active = 1 AND pc.category_id = ? ORDER BY p.id`
+      ).all(catId);
+    } else {
+      products = db.prepare('SELECT * FROM products WHERE is_active = 1 ORDER BY id').all();
+    }
+
+    if (products.length === 0) {
+      return ctx.answerCbQuery(t(lang, 'no_active_products'), { show_alert: true });
+    }
+
+    const cat = catId > 0 ? db.prepare('SELECT * FROM categories WHERE id = ?').get(catId) : null;
+    const header = cat
+      ? `${cat.emoji || '🗂'} <b>${categoryName(cat, lang)}</b>\n${t(lang, 'products_list_msg') || 'Ürünleri seçin:'}`
+      : (t(lang, 'products_list_msg') || '🛒 <b>Ürünler:</b>');
+
+    const buttons = [];
+    for (const p of products) {
+      const localizedName = getProductName(p, lang);
+      const stockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(p.id).count;
+
+      let priceNum = null;
+      let soldOut = false;
+      let visibleStock = stockCount;
+
+      if ((p.pricing_mode || 'manual') === 'manual') {
+        priceNum = getUserUnitPrice(ctx.from.id, p);
+        if (stockCount === 0) {
+          // legacy reserve presentation: +10%
+          priceNum = priceNum * 1.10;
+          buttons.push([{
+            text: `${localizedName.slice(0, 34)} — ${priceNum.toFixed(2)}$ ${t(lang, 'reserve_btn_label') || 'REZERVE'}`,
+            callback_data: `buy_${p.id}`
+          }]);
+          continue;
+        }
+      } else {
+        try {
+          const decision = await PricingEngine.price(p, { qty: 1 });
+          if (decision.soldOut || decision.displayUnit === null) {
+            soldOut = true;
+            priceNum = p.price || 0; // last known price, row stays visible
+          } else {
+            priceNum = decision.displayUnit;
+            visibleStock = stockCount + decision.affordable.reduce((a, o) => a + (o.realStock || 0), 0);
+          }
+        } catch (e) {
+          priceNum = p.price || 0;
+        }
+      }
+
+      const badge = soldOut ? ` ${t(lang, 'badge_sold_out') || '🔴 tükendi'}` : (visibleStock > 0 ? ` (${visibleStock})` : '');
+      buttons.push([{
+        text: `${localizedName.length > 32 ? localizedName.slice(0, 30) + '…' : localizedName} — ${priceNum.toFixed(2)}$${badge}`,
+        callback_data: `buy_${p.id}`
+      }]);
+    }
+
+    if (catId > 0) buttons.push([{ text: t(lang, 'btn_all_products') || '📋 Tümü', callback_data: 'cat_0' }]);
+    buttons.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
+
+    return ctx.editMessageText(header, {
+      parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons }
+    }).catch(() => {});
+  }
+
+  /**
+   * Step 2: product detail — service list ("1 - $3.00") in dynamic mode.
+   * In manual mode this behaves exactly like before (straight to quantity).
+   */
   bot.action(/^buy_(\d+)$/, async (ctx) => {
     const lang = getUserLang(ctx.from.id);
     const productId = parseInt(ctx.match[1], 10);
@@ -541,70 +647,171 @@ function setupUserHandlers(bot) {
       return ctx.answerCbQuery(t(lang, 'product_not_found'), { show_alert: true });
     }
 
-    const stockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(productId).count;
-
-    if (stockCount === 0) {
-      ctx.session = ctx.session || {};
-      ctx.session.isReservation = true;
-      let quantities = [1, 5, 10, 20, 50, 100];
-      const qtyButtons = [];
-      for (let i = 0; i < quantities.length; i += 2) {
-        const row = [];
-        row.push({ text: `${quantities[i]}`, callback_data: `qty_${productId}_${quantities[i]}` });
-        if (i + 1 < quantities.length) {
-          row.push({ text: `${quantities[i + 1]}`, callback_data: `qty_${productId}_${quantities[i + 1]}` });
-        }
-        qtyButtons.push(row);
-      }
-      qtyButtons.push([{ text: t(lang, 'btn_custom_quantity'), callback_data: `customqty_${productId}` }]);
-      qtyButtons.push([{ text: t(lang, 'btn_cancel'), callback_data: 'main_menu' }]);
-
-      const localizedName = getProductName(product, lang);
-      const displayPrice = (getUserUnitPrice(ctx.from.id, product) * 1.10).toFixed(2);
-      const msg = t(lang, 'reserve_prompt_msg', { name: localizedName, price: displayPrice });
-
-      return ctx.editMessageText(msg, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: qtyButtons
-        }
-      });
-    } else {
-      ctx.session = ctx.session || {};
-      ctx.session.isReservation = false;
-    }
-
-    // Seçilebilir adetler (stok sayısına göre filtrelenir)
-    let quantities = [1, 5, 10, 20, 50, 100];
-    quantities = quantities.filter(q => q < stockCount);
-    quantities.push(stockCount); // En büyük stok sayısını sonuna ekle (örnek: 98 ise 100 yerine 98 yazar)
-
-    // Satır satır butonlar (2 sütun)
-    const qtyButtons = [];
-    for (let i = 0; i < quantities.length; i += 2) {
-      const row = [];
-      row.push({ text: `${quantities[i]}`, callback_data: `qty_${productId}_${quantities[i]}` });
-      if (i + 1 < quantities.length) {
-        row.push({ text: `${quantities[i + 1]}`, callback_data: `qty_${productId}_${quantities[i + 1]}` });
-      }
-      qtyButtons.push(row);
-    }
-
-    // Özel adet butonu
-    qtyButtons.push([{ text: t(lang, 'btn_custom_quantity'), callback_data: `customqty_${productId}` }]);
-    qtyButtons.push([{ text: t(lang, 'btn_cancel'), callback_data: 'main_menu' }]);
+    ctx.session = ctx.session || {};
+    ctx.session.state = null;
+    ctx.session.isReservation = undefined;
+    ctx.session.bidConfirmed = false;
+    ctx.session.bidPrice = null;
 
     const localizedName = getProductName(product, lang);
-    const displayPrice = getUserUnitPrice(ctx.from.id, product).toFixed(2);
-    const msg = t(lang, 'choose_quantity_msg', { name: localizedName, price: displayPrice, stock: stockCount });
+    const stockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(productId).count;
 
-    ctx.editMessageText(msg, {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: qtyButtons
+    // ---- manual mode: legacy behaviour (quantity straight away) ----
+    if ((product.pricing_mode || 'manual') === 'manual') {
+      ctx.session.baseUnitPrice = null;
+      ctx.session.priceLockToken = null;
+      return renderQuantityMenu(ctx, lang, product, stockCount, getUserUnitPrice(ctx.from.id, product));
+    }
+
+    // ---- dynamic mode: show the service list ----
+    let decision;
+    try {
+      decision = await PricingEngine.price(product, { qty: 1 });
+    } catch (e) {
+      console.error('pricing failed:', e.message);
+      ctx.session.baseUnitPrice = null;
+      return renderQuantityMenu(ctx, lang, product, stockCount, getUserUnitPrice(ctx.from.id, product));
+    }
+
+    const lines = [];
+    const serviceButtons = [];
+    const { TranslationService } = require('../services/TranslationService');
+    decision.all.forEach((o, i) => {
+      const visible = decision.maskedStock.get(o.product_supplier_id);
+      const price = o.sellUnit.toFixed(2);
+      const tag = o.product_supplier_id === (decision.priceOffer && decision.priceOffer.product_supplier_id) ? ' ⭐' : '';
+      const svcName = String(TranslationService.translate(o.remote_name || o.supplier_name, lang) || '').slice(0, 38);
+      lines.push(`#${i + 1} ${svcName}: <b>$${price}</b>${tag}  ${visible != null ? `(stok ${visible})` : ''}${o.affordable ? '' : ` — ${o.reason === 'insufficient_balance' || o.reason === 'no_balance' ? (t(lang, 'badge_sold_out') || 'tükendi') : o.reason}`}`);
+      if (o.affordable) {
+        serviceButtons.push([{ text: `#${i + 1} — ${price}$ · ${svcName}`, callback_data: `svc_${productId}_${o.product_supplier_id}` }]);
       }
     });
+
+    const headline = decision.soldOut
+      ? `${localizedName}\n\n🔴 <b>${t(lang, 'badge_sold_out') || 'Şu an tükendi'}</b> — ${t(lang, 'sold_out_hint') || 'tedarikçi bakiyesi/stok yetersiz. Ödeme yapmadan rezerve edebilirsiniz.'}`
+      : `${localizedName}\n\n🏷 <b>$${decision.displayUnit.toFixed(2)}</b>\n\n${lines.join('\n')}`;
+
+    const keyboard = [...serviceButtons];
+    if (!decision.soldOut) {
+      const baseUnit = decision.displayUnit;
+      const token = issuePriceLock(ctx, product, decision, baseUnit);
+      ctx.session.priceLockToken = token;
+      ctx.session.baseUnitPrice = baseUnit;
+      keyboard.push([{ text: t(lang, 'btn_best_offer') || '⭐ En iyi teklif ile al', callback_data: `svc_${productId}_best` }]);
+    } else {
+      ctx.session.priceLockToken = null;
+      ctx.session.baseUnitPrice = null;
+      keyboard.push([{ text: t(lang, 'reserve_btn_label') || '⏳ Rezerve et', callback_data: `resonly_${productId}` }]);
+    }
+    keyboard.push([{ text: t(lang, 'btn_back_products') || '🔙 Ürünler', callback_data: catBackTarget(productId) }]);
+
+    return ctx.editMessageText(headline, {
+      parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard }
+    }).catch(() => {});
   });
+
+  bot.action(/^catback_(\d+)$/, async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    const productId = parseInt(ctx.match[1], 10);
+    const pc = db.prepare('SELECT category_id FROM product_categories WHERE product_id = ? ORDER BY category_id LIMIT 1').get(productId);
+    return showProductsForCategory(ctx, lang, pc ? pc.category_id : 0);
+  });
+
+  function catBackTarget(productId) {
+    const pc = db.prepare('SELECT category_id FROM product_categories WHERE product_id = ? ORDER BY category_id LIMIT 1').get(productId);
+    return pc ? `cat_${pc.category_id}` : 'menu_products';
+  }
+
+  // Reserve-only entry when everything is sold out
+  bot.action(/^resonly_(\d+)$/, async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    const productId = parseInt(ctx.match[1], 10);
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+    if (!product) return ctx.answerCbQuery('Ürün bulunamadı.', { show_alert: true });
+    ctx.session = ctx.session || {};
+    ctx.session.isReservation = true;
+    const stockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(productId).count;
+    const unit = ctx.session.baseUnitPrice !== null && ctx.session.baseUnitPrice !== undefined
+      ? ctx.session.baseUnitPrice : getUserUnitPrice(ctx.from.id, product);
+    return renderQuantityMenu(ctx, lang, product, stockCount, unit * 1.10, true);
+  });
+
+  /** Step: choose a specific service (offer) then quantity. */
+  bot.action(/^svc_(\d+)_(\w+)$/, async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    const productId = parseInt(ctx.match[1], 10);
+    const which = ctx.match[2];
+    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+    if (!product) return ctx.answerCbQuery('Ürün bulunamadı.', { show_alert: true });
+
+    ctx.session = ctx.session || {};
+    const stockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(productId).count;
+
+    let decision;
+    try {
+      decision = await PricingEngine.price(product, { qty: 1 });
+    } catch (e) {
+      return ctx.answerCbQuery('Fiyat alınamadı, tekrar deneyin.', { show_alert: true });
+    }
+
+    let offer = null;
+    if (which === 'best') {
+      offer = decision.priceOffer;
+    } else {
+      const psId = parseInt(which, 10);
+      offer = decision.all.find((o) => o.product_supplier_id === psId);
+      if (offer && !offer.affordable) offer = null;
+    }
+    if (!offer) return ctx.answerCbQuery('Bu teklif artık mevcut değil.', { show_alert: true });
+
+    ctx.session.baseUnitPrice = offer.sellUnit;
+    ctx.session.chosenSupplier = offer.supplier_id;
+    ctx.session.chosenPs = offer.product_supplier_id;
+    ctx.session.priceLockToken = issuePriceLock(ctx, product, { fulfillOffer: offer }, offer.sellUnit);
+
+    return renderQuantityMenu(ctx, lang, product, stockCount, offer.sellUnit);
+  });
+
+  /** Quantity picker (shared by manual + dynamic paths). */
+  async function renderQuantityMenu(ctx, lang, product, stockCount, unitPrice, forceReservation = false) {
+    const productId = product.id;
+    const isReserve = forceReservation || ctx.session.isReservation === true || stockCount === 0;
+    if (isReserve && !forceReservation) ctx.session.isReservation = true;
+    if (forceReservation) ctx.session.isReservation = true;
+
+    let quantities = [1, 5, 10, 20, 50, 100];
+    if (!isReserve && !product.auto_restock_enabled) {
+      quantities = quantities.filter((q) => q < stockCount);
+      if (stockCount > 0) quantities.push(stockCount);
+    }
+    if (!quantities.length) quantities = [1];
+
+    const qtyButtons = [];
+    for (let i = 0; i < quantities.length; i += 2) {
+      const row = quantities.slice(i, i + 2).map((q) => ({ text: `${q}`, callback_data: `qty_${productId}_${q}` }));
+      qtyButtons.push(row);
+    }
+    qtyButtons.push([{ text: t(lang, 'btn_custom_quantity'), callback_data: `customqty_${productId}` }]);
+    qtyButtons.push([{ text: t(lang, 'btn_cancel'), callback_data: catBackTarget(productId) }]);
+
+    const displayPrice = (isReserve ? unitPrice : unitPrice).toFixed(2);
+    const msg = isReserve
+      ? (t(lang, 'reserve_prompt_msg', { name: getProductName(product, lang), price: displayPrice }) ||
+        `📦 <b>${getProductName(product, lang)}</b>\nStok yok — rezerve fiyat: <b>${displayPrice}$</b>\nAdet seçin:`)
+      : (t(lang, 'choose_quantity_msg', { name: getProductName(product, lang), price: displayPrice, stock: stockCount }) ||
+        `📦 <b>${getProductName(product, lang)}</b>\nFiyat: <b>${displayPrice}$</b>\nAdet seçin:`);
+
+    return ctx.editMessageText(msg, {
+      parse_mode: 'HTML', reply_markup: { inline_keyboard: qtyButtons }
+    }).catch(() => {});
+  }
+
+  // Legacy product list entry kept for admins/quick access
+  bot.action('menu_products_flat', async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    return showProductsForCategory(ctx, lang, 0);
+  });
+
 
   // Hazır adet seçimi
   bot.action(/^qty_(\d+)_(\d+)$/, async (ctx) => {
@@ -684,19 +891,38 @@ function setupUserHandlers(bot) {
     const isReservation = ctx.session.isReservation === true;
     const isPartialReservation = ctx.session.isPartialReservation === true;
 
+    // Fiyat kilidi: servis adımında gösterilen birim fiyat, TTL süresi boyunca
+    // geçerlidir (kategori/mode değişse bile müşterinin gördüğü fiyat istenir).
+    let lockedUnit = null;
+    if (ctx.session.priceLockToken) {
+      const lock = readPriceLock(ctx.session.priceLockToken);
+      if (lock) lockedUnit = lock.unit_price;
+      else {
+        ctx.session.priceLockToken = null;
+        ctx.session.baseUnitPrice = null;
+      }
+    }
+    const unitBase = lockedUnit !== null ? lockedUnit
+      : (ctx.session.baseUnitPrice !== null && ctx.session.baseUnitPrice !== undefined ? ctx.session.baseUnitPrice : null);
+
+    // Dinamik modda (veya kullanıcı bilinçli bir servis seçtiyse) ödeme
+    // anında tedarikçiden alım yapılabilir — auto_restock bayrağı şart değil.
+    const dynamicRestock = ((product.pricing_mode || 'manual') !== 'manual' && !!ctx.session.chosenPs)
+      || !!product.auto_restock_enabled;
+
     // Fetch reservation fee
     const reservationFee = getReservationFee(ctx.from.id);
       
     const SupplierManager = require('../services/SupplierManager');
     let apiStock = 0;
     let missingQuantity = Math.max(0, qty - stockCount);
-    if (missingQuantity > 0 && product.auto_restock_enabled) {
+    if (missingQuantity > 0 && dynamicRestock) {
         apiStock = await SupplierManager.getAffordableQuantity(product, missingQuantity);
     }
     const trueMissing = Math.max(0, missingQuantity - apiStock);
     ctx.session.trueMissing = trueMissing;
 
-    let maxAllowed = (isReservation || product.auto_restock_enabled) ? 10000 : stockCount;
+    let maxAllowed = (isReservation || dynamicRestock) ? 10000 : stockCount;
 
     if (qty > maxAllowed) {
       const msg = t(lang, 'not_enough_stock', { max: maxAllowed });
@@ -714,9 +940,9 @@ function setupUserHandlers(bot) {
       
       let baseUnitPrice = 0;
       if (isReservation) {
-          baseUnitPrice = (calculateTotalPrice(ctx.from.id, product, 1) * 1.10) + reservationFee;
+          baseUnitPrice = (calculateTotalPrice(ctx.from.id, product, 1, unitBase) * 1.10) + reservationFee;
       } else {
-          baseUnitPrice = calculateTotalPrice(ctx.from.id, product, 1) + reservationFee;
+          baseUnitPrice = calculateTotalPrice(ctx.from.id, product, 1, unitBase) + reservationFee;
       }
 
       if (highestBid >= baseUnitPrice) {
@@ -747,8 +973,8 @@ function setupUserHandlers(bot) {
       const missing = qty - stockCount;
       const feeTotal = trueMissing * reservationFee;
 
-      const priceAvailable = calculateTotalPrice(ctx.from.id, product, stockCount);
-      let priceMissing = calculateTotalPrice(ctx.from.id, product, missing);
+      const priceAvailable = calculateTotalPrice(ctx.from.id, product, stockCount, unitBase);
+      let priceMissing = calculateTotalPrice(ctx.from.id, product, missing, unitBase);
       // Removed 10% markup for partial reservations, only flat fee applies as requested
       priceMissing = priceMissing + feeTotal;
 
@@ -775,7 +1001,7 @@ function setupUserHandlers(bot) {
         [{ text: btnReserve, callback_data: `partialres_${productId}_${qty}` }]
       ];
       if (stockCount > 0) {
-        keyboard.push([{ text: btnBuyStock, callback_data: `buy_${productId}_${stockCount}` }]);
+        keyboard.push([{ text: btnBuyStock, callback_data: `qty_${productId}_${stockCount}` }]);
       }
       keyboard.push([{ text: btnCancel, callback_data: 'main_menu' }]);
 
@@ -792,21 +1018,21 @@ function setupUserHandlers(bot) {
       if (ctx.session.bidConfirmed && ctx.session.bidPrice) {
          totalPrice = ctx.session.bidPrice * qty;
       } else {
-         let basePrice = calculateTotalPrice(ctx.from.id, product, qty);
+         let basePrice = calculateTotalPrice(ctx.from.id, product, qty, unitBase);
          totalPrice = (basePrice * 1.10) + (trueMissing * reservationFee);
       }
     } else if (isPartialReservation) {
       const missing = qty - stockCount;
-      const priceAvailable = calculateTotalPrice(ctx.from.id, product, stockCount);
+      const priceAvailable = calculateTotalPrice(ctx.from.id, product, stockCount, unitBase);
       let priceMissing = 0;
       if (ctx.session.bidConfirmed && ctx.session.bidPrice) {
          priceMissing = ctx.session.bidPrice * missing;
       } else {
-         priceMissing = calculateTotalPrice(ctx.from.id, product, missing) + (trueMissing * reservationFee);
+         priceMissing = calculateTotalPrice(ctx.from.id, product, missing, unitBase) + (trueMissing * reservationFee);
       }
       totalPrice = priceAvailable + priceMissing;
     } else {
-      totalPrice = calculateTotalPrice(ctx.from.id, product, qty);
+      totalPrice = calculateTotalPrice(ctx.from.id, product, qty, unitBase);
     }
 
     // Checkout Selection
@@ -878,7 +1104,7 @@ function setupUserHandlers(bot) {
     const lang = getUserLang(ctx.from.id);
 
     if (ctx.session && ctx.session.state === 'waiting_custom_quantity') {
-      const input = parseInt(ctx.message.text.trim(), 10);
+      const input = require('../utils/money').parseQuantity(ctx.message.text);
 
       if (isNaN(input) || input <= 0) {
         return ctx.reply(t(lang, 'invalid_quantity'));
@@ -928,6 +1154,8 @@ function setupUserHandlers(bot) {
     const productId = ctx.session.productId;
     let qty = ctx.session.productQuantity;
     const totalPrice = ctx.session.productPrice;
+    const unitBase = (ctx.session.baseUnitPrice !== null && ctx.session.baseUnitPrice !== undefined) ? ctx.session.baseUnitPrice : null;
+    let supplierProvenance = null;
 
     const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
     let localStockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(productId).count;
@@ -947,7 +1175,7 @@ function setupUserHandlers(bot) {
       // We split the paid amount proportionally (approximate) or exactly
       const tm = ctx.session.trueMissing !== undefined ? ctx.session.trueMissing : qtyToReserve;
         const totalFee = tm * reservationFee;
-        const baseUnitPrice = calculateTotalPrice(ctx.from.id, product, 1);
+        const baseUnitPrice = calculateTotalPrice(ctx.from.id, product, 1, unitBase);
         let reserveUnitPrice = ctx.session.bidConfirmed && ctx.session.bidPrice ? ctx.session.bidPrice : (baseUnitPrice + (qtyToReserve > 0 ? (totalFee / qtyToReserve) : 0));
       let reservedTotalCost = costUsd * qtyToReserve;
       let reservedTotalSell = reserveUnitPrice * qtyToReserve;
@@ -977,7 +1205,7 @@ function setupUserHandlers(bot) {
 
       const tm = ctx.session.trueMissing !== undefined ? ctx.session.trueMissing : qty;
         const totalFee = tm * reservationFee;
-        const baseUnitPrice = calculateTotalPrice(ctx.from.id, product, 1) * 1.10;
+        const baseUnitPrice = calculateTotalPrice(ctx.from.id, product, 1, unitBase) * 1.10;
         let reserveUnitPrice = ctx.session.bidConfirmed && ctx.session.bidPrice ? ctx.session.bidPrice : (baseUnitPrice + (qty > 0 ? (totalFee / qty) : 0));
       
       // Save to reservations
@@ -1002,28 +1230,44 @@ function setupUserHandlers(bot) {
 
       ctx.session.state = null;
       ctx.session.isReservation = false;
+      ctx.session.priceLockToken = null;
+      ctx.session.baseUnitPrice = null;
+      ctx.session.chosenPs = null;
+      ctx.session.chosenSupplier = null;
 
       sendOrderLog(ctx.telegram, true, ctx.from.id, product ? getProductName(product, 'en') : productId, qty);
 
       return ctx.reply(t(lang, 'reserve_success_msg', { qty }), { parse_mode: 'HTML' });
     }
 
-    // Otomatik Stok Tamamlama
+    // Otomatik Stok Tamamlama (veya dinamik modda doğrudan tedarikçi alımı)
     const threshold = product.auto_restock_threshold || 0;
-    // We check if product has mapped suppliers instead of relying solely on api_service_id.
-    // But auto_restock_enabled should be true.
-    if ((localStockCount - qty <= threshold) && product.auto_restock_enabled) {
+    const chosenPs = ctx.session.chosenPs || null;
+    const dynamicDirect = ((product.pricing_mode || 'manual') !== 'manual' || chosenPs) && qty > localStockCount;
+    if ((localStockCount - qty <= threshold && product.auto_restock_enabled) || dynamicDirect) {
       try {
         const needed = qty - localStockCount;
-        const buyQty = Math.max(product.auto_restock_qty || 1, needed > 0 ? needed : 0);
+        const buyQty = dynamicDirect && needed > 0
+          ? needed
+          : Math.max(product.auto_restock_qty || 1, needed > 0 ? needed : 0);
 
         if (needed > 0) {
           ctx.reply(t(lang, 'auto_restock_searching') || "🔄 İsteğiniz üzerine yeni stoklar inceleniyor ve sisteme dahil ediliyor. Lütfen bekleyin...");
         }
 
         const SupplierManager = require('../services/SupplierManager');
-        const orderResult = await SupplierManager.placeOrder(product, buyQty);
+        const orderResult = await SupplierManager.placeOrder(product, buyQty, {
+          sellPriceUnit: (ctx.session.productPrice || totalPrice) / Math.max(1, ctx.session.productQuantity || qty),
+          idempotency_key: `${txid}_${product.id}_${buyQty}`
+        });
         const apiResponse = orderResult.result;
+        supplierProvenance = {
+          supplier_id: orderResult.supplier_id || null,
+          remote_service_id: orderResult.remote_service_id || null,
+          external_order_id: apiResponse.external_order_id || null,
+          margin_pct: apiResponse.margin_pct != null ? apiResponse.margin_pct : null,
+          api_unit_cost: buyQty > 0 && apiResponse.cost_usd != null ? apiResponse.cost_usd / buyQty : null
+        };
 
         if (apiResponse && (apiResponse.success || (apiResponse.products && apiResponse.products.length > 0)) && apiResponse.products) {
           const insertStock = db.prepare('INSERT INTO stocks (product_id, data, is_sold) VALUES (?, ?, 0)');
@@ -1078,14 +1322,27 @@ function setupUserHandlers(bot) {
     try {
       const deliveredStocks = deliverStock();
       ctx.session.state = null; // İşlem bitti
+      ctx.session.priceLockToken = null;
+      ctx.session.chosenPs = null;
+      ctx.session.chosenSupplier = null;
+      ctx.session.baseUnitPrice = null;
 
-      // 5. Update Stats and Orders
-      const costUsd = product.cost_usd || 0;
+      // 5. Update Stats and Orders — gerçek API maliyeti varsa ürün maliyetinin önüne geçer
+      const costUsd = supplierProvenance && supplierProvenance.api_unit_cost != null
+        ? supplierProvenance.api_unit_cost
+        : (product.cost_usd || 0);
       const profitUsd = paidAmount - (costUsd * qty);
-      db.prepare('INSERT INTO orders (user_id, product_id, qty, cost_usd, sell_usd, profit_usd, cost_try, sell_try, profit_try, delivered_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      db.prepare(`INSERT INTO orders (user_id, product_id, qty, cost_usd, sell_usd, profit_usd, cost_try, sell_try, profit_try, delivered_data,
+        supplier_id, remote_service_id, cost_usd_at_purchase, margin_pct_at_purchase, external_order_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         ctx.from.id, productId, qty, costUsd, paidAmount, profitUsd,
         costUsd * qty * tryRate, paidAmount * tryRate, profitUsd * tryRate,
-        JSON.stringify(deliveredStocks)
+        JSON.stringify(deliveredStocks),
+        supplierProvenance ? supplierProvenance.supplier_id : null,
+        supplierProvenance ? supplierProvenance.remote_service_id : null,
+        supplierProvenance && supplierProvenance.api_unit_cost != null ? supplierProvenance.api_unit_cost : (product.cost_usd || 0),
+        supplierProvenance ? supplierProvenance.margin_pct : null,
+        supplierProvenance ? supplierProvenance.external_order_id : null
       );
 
       // Update total purchases for Rank system
