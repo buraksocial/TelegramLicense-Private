@@ -1,6 +1,10 @@
 const { db } = require('../db');
 const SupplierManager = require('../services/SupplierManager');
 const axios = require('axios');
+const CatalogStore = require('../services/CatalogStore');
+const { classifyWarranty, LABELS } = require('../utils/warranty');
+
+const PER_PAGE_BIND = 12;
 
 function setupAdminApiHandlers(bot, adminMiddleware) {
 
@@ -295,16 +299,76 @@ function setupAdminApiHandlers(bot, adminMiddleware) {
   bot.action(/^admin_link_sup_sel_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
     const pId = parseInt(ctx.match[1], 10);
     const sId = parseInt(ctx.match[2], 10);
-    
-    ctx.session = ctx.session || {};
-    ctx.session.adminState = 'waiting_link_supplier_service_id';
-    ctx.session.linkProductId = pId;
-    ctx.session.linkSupplierId = sId;
 
-    ctx.editMessageText(`🔗 <b>Tedarikçi Bağlama (Adım 2/2)</b>\n\nLütfen sadece tedarikçinin API tarafındaki <b>Servis ID'sini (Remote Service ID)</b> yazın:\n<i>Örn: 105, AIVerse_5, vb.</i>`, {
-      parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: `admin_prod_sup_${pId}` }]] }
+    // Servis ID yazma devri bitti: katalog snapshot'ında gez, dokun, bağla.
+    ctx.session = ctx.session || {};
+    ctx.session.cp = ctx.session.cp || {};
+    ctx.session.cp.bindProductId = pId;
+    ctx.session.cp.bindSid = sId;
+    const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(sId);
+    if (!supplier) return ctx.answerCbQuery('Tedarikçi yok.', { show_alert: true });
+
+    let rows = CatalogStore.readSnapshot(sId);
+    if (!rows.length) {
+      return ctx.answerCbQuery('Bu tedarikçinin katalog snapshot\'ı yok — önce ⚙️ API → Katalog: ' + supplier.name + ' ile tazele.', { show_alert: true });
+    }
+    rows.sort((a, b) => (a.price_usd ?? 1e9) - (b.price_usd ?? 1e9));
+    rows = rows.slice(0, PER_PAGE_BIND);
+    ctx.session.cp.bindRows = rows.map((r) => ({ remote_service_id: r.remote_service_id, name: r.name, price_usd: r.price_usd, stock: r.stock, warranty: r.warranty }));
+
+    const linked = new Set(db.prepare('SELECT remote_service_id FROM product_suppliers WHERE supplier_id = ?').all(sId).map((r) => r.remote_service_id));
+    let text = `🔗 <b>${supplier.name}</b> → ürün #${pId}\nServise dokun (fiyata göre sıralı, ilk ${rows.length}):\n\n`;
+    const keyboard = [];
+    rows.forEach((r, i) => {
+      const w = classifyWarranty(r.name);
+      const badge = w === 'guaranteed' ? ' 🛡' : w === 'instant' ? ' ⚡' : '';
+      text += `#${i + 1} <b>$${r.price_usd ?? '?'}</b> · ${r.stock ?? '?'} stok · ${String(r.name || r.remote_service_id).slice(0, 44)}${badge}${linked.has(String(r.remote_service_id)) ? ' 🔗' : ''}\n`;
+      keyboard.push([{ text: `#${i + 1} ${String(r.name || r.remote_service_id).slice(0, 30)}`, callback_data: `alb_${i}` }]);
     });
+    keyboard.push([{ text: '🔙 Tedarikçi seç', callback_data: `admin_link_sup_${pId}` }]);
+    return ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }).catch(() => {});
+  });
+
+  bot.action(/^alb_(\d+)$/, adminMiddleware, (ctx) => {
+    const cp = ctx.session && ctx.session.cp;
+    if (!cp || !cp.bindProductId || !cp.bindRows) return ctx.answerCbQuery('Liste düştü, baştan dene.', { show_alert: true });
+    const r = cp.bindRows[parseInt(ctx.match[1], 10)];
+    if (!r) return ctx.answerCbQuery('Servis bulunamadı.', { show_alert: true });
+    const pId = cp.bindProductId;
+
+    const cls = classifyWarranty(r.name);
+    const kb = [
+      [{ text: `✅ Bağla (${LABELS[cls] || cls})`, callback_data: `alb_go_${pId}_${r.remote_service_id}` }],
+      [{ text: '🔙 Liste', callback_data: `admin_link_sup_sel_${pId}_${cp.bindSid}` }]
+    ];
+    return ctx.editMessageText(
+      `Servis: <b>${r.name}</b>\nID <code>${r.remote_service_id}</code> · $${r.price_usd ?? '?'} · stok ${r.stock ?? '?'}\n` +
+      `Otomatik garanti sınıfı: <b>${LABELS[cls] || cls}</b>`,
+      { parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } }
+    ).catch(() => {});
+  });
+
+  bot.action(/^alb_go_(\d+)_(.+)$/, adminMiddleware, (ctx) => {
+    const pId = parseInt(ctx.match[1], 10);
+    const remoteId = ctx.match[2];
+    const cp = ctx.session && ctx.session.cp;
+    const row = cp && cp.bindRows && cp.bindRows.find((x) => String(x.remote_service_id) === String(remoteId));
+    const sId = cp && cp.bindSid;
+    if (!sId) return ctx.answerCbQuery('Tedarikçi seçimi düştü, tekrar dene.', { show_alert: true });
+
+    const prio = db.prepare('SELECT COALESCE(MAX(priority),0)+1 p FROM product_suppliers WHERE product_id = ?').get(pId).p;
+    const exists = db.prepare('SELECT 1 FROM product_suppliers WHERE product_id=? AND supplier_id=? AND remote_service_id=?').get(pId, sId, String(remoteId));
+    if (exists) return ctx.answerCbQuery('Bu link zaten var.', { show_alert: true });
+
+    db.prepare(`INSERT INTO product_suppliers (product_id, supplier_id, remote_service_id, priority, last_price_usd, last_stock)
+                VALUES (?,?,?,?,?,?)`)
+      .run(pId, sId, String(remoteId), prio, row ? row.price_usd : null, row ? row.stock : null);
+    delete ctx.session.cp;
+    ctx.answerCbQuery('Bağlandı ✓').catch(() => {});
+    return ctx.editMessageText(`✅ Servis <code>${remoteId}</code> ürün #${pId}'e bağlandı (prio ${prio}).\nMarj/taban: Ürün detayı → Tedarikçi linkleri`, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '📦 Ürün linkleri', callback_data: `admin_prod_sup_${pId}` }]] }
+    }).catch(() => {});
   });
 
   // ---- AUTO BUY MANAGEMENT ----

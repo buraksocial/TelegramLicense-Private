@@ -244,6 +244,45 @@ class TranslationService {
   }
 
   /** Push translated names back into products.name JSON when missing. */
+  /**
+   * Agent copy-writing: given a raw supplier service name/description,
+   * produce a clean localized product name + selling description for the
+   * store, in one LLM call per language. Used by the "katalogdan ürün ekle"
+   * flow so the admin never types descriptions by hand.
+   * @returns {Promise<Object<string, {name:string, description:string}>>}
+   */
+  static async generateProductCopy(sourceName, sourceDesc, langs, extra = '') {
+    const out = {};
+    for (const lang of langs) {
+      const messages = [
+        {
+          role: 'system',
+          content:
+            'You write product listings for a Telegram digital-license store. ' +
+            `Language: ${langName(lang)}. ` +
+            'Output JSON: {"name": "...", "description": "..."} where name is a short clean product title ' +
+            '(keep brand names, add plan length like 12 Ay / 3 Ay) and description is 3-5 bullet lines with ' +
+            'emojis (✅) covering what the buyer gets, delivery type and a short note. ' +
+            'Never mention prices, suppliers or warranty hours unless present in the source. No markdown.' +
+            (extra ? ' Context: ' + extra : '')
+        },
+        { role: 'user', content: JSON.stringify({ source_name: sourceName, source_desc: sourceDesc || '' }) }
+      ];
+      try {
+        const res = await axios.post(
+          `${LLM_BASE_URL}/chat/completions`,
+          { model: LLM_MODEL, messages, temperature: 0.4, response_format: { type: 'json_object' } },
+          { headers: { Authorization: `Bearer ${LLM_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 90000 }
+        );
+        const parsed = JSON.parse(res.data.choices[0].message.content || '{}');
+        if (parsed.name) out[lang] = { name: String(parsed.name).trim(), description: String(parsed.description || '').trim() };
+      } catch (e) {
+        console.error(`[TranslationService] copy gen ${lang} failed:`, e.message);
+      }
+    }
+    return out;
+  }
+
   static applyToProducts() {
     const products = db.prepare('SELECT id, name FROM products').all();
     const upd = db.prepare('UPDATE products SET name = ? WHERE id = ?');

@@ -181,6 +181,7 @@ function setupAdminHandlers(bot) {
     if (navButtons.length > 0) buttons.push(navButtons);
     
     buttons.unshift([{ text: '➕ Yeni Ürün Ekle', callback_data: 'admin_add_product' }]);
+    buttons.unshift([{ text: '🧩 Katalogdan Ürün Ekle (API)', callback_data: 'acp_start' }]);
     buttons.push([{ text: '🔙 Ana Menü', callback_data: 'admin_back_main' }]);
 
     ctx.editMessageText(`📦 <b>Ürün Yönetimi (Sayfa ${page})</b>\nLütfen detaylarını görmek istediğiniz ürünü seçin:`, {
@@ -225,7 +226,8 @@ function setupAdminHandlers(bot) {
       console.error('product pricing detail failed:', e.message);
     }
 
-    const text = `📦 <b>Ürün Detayı:</b> ${name}\n\n💵 <b>Satış Fiyatı:</b> ${product.price} USD\n💰 <b>Birim Maliyet:</b> ${product.cost_usd || 0} USD\n🛒 <b>Mevcut Stok:</b> ${stockCount} adet${pricingBlock}`;
+    const W = { none: '🧩 Klasik', guaranteed: '🛡 Garantili', instant: '⚡ Anlık' };
+    const text = `📦 <b>Ürün Detayı:</b> ${name}\n\n💵 <b>Satış Fiyatı:</b> ${product.price} USD\n💰 <b>Birim Maliyet:</b> ${product.cost_usd || 0} USD\n🛒 <b>Mevcut Stok:</b> ${stockCount} adet\n🛡 <b>Garanti sınıfı:</b> ${W[product.warranty] || W.none}${pricingBlock}`;
 
     ctx.editMessageText(text, {
       parse_mode: 'HTML',
@@ -235,6 +237,7 @@ function setupAdminHandlers(bot) {
           [{ text: '➕ Stok Ekle', callback_data: `admin_sel_stock_${productId}` }],
           [{ text: '📝 İsmini Düzenle', callback_data: `admin_prod_edit_name_${productId}` }],
           [{ text: '💵 Fiyat/Maliyet Düzenle', callback_data: `admin_prod_edit_price_${productId}` }],
+          [{ text: '🛡 Garanti sınıfı değiştir', callback_data: `admin_prod_warranty_${productId}` }],
           [{ text: '🧮 Fiyalama Modu / Kâr / Alt Limit', callback_data: `admin_prod_pricing_${productId}` }],
           [{ text: '🎁 Toplu Alım Kuralları', callback_data: `admin_prod_bulk_${productId}` }],
           [{ text: '📈 Tüm Fiyatlara Zam Yap (%)', callback_data: `admin_prod_increase_${productId}` }],
@@ -364,15 +367,18 @@ function setupAdminHandlers(bot) {
     ).get(psId);
     if (!link) return ctx.answerCbQuery('Bağlantı bulunamadı.', { show_alert: true });
 
-    const effMargin = link.margin_percent ?? '(ürün varsayılanı)';
-    const effFloor = link.floor_price ?? '(ürün varsayılanı)';
+    const { LABELS: W_LABELS } = require('../utils/warranty');
+    const catRow = db.prepare('SELECT warranty, name FROM supplier_catalogs WHERE supplier_id = ? AND remote_service_id = ?').get(link.supplier_id, link.remote_service_id);
+    const autoCls = catRow ? (catRow.warranty || 'unknown') : 'unknown';
+    const effW = link.warranty && link.warranty !== 'auto' ? link.warranty : `auto→${autoCls}`;
+
     const text =
       `🏭 <b>${link.supplier_name}</b> (${link.type})\nService: <code>${link.remote_service_id}</code>\n\n` +
       `Son bilinen maliyet: <b>${link.last_price_usd != null ? `$${link.last_price_usd}` : '?'}</b>` +
       ` | Stok: <b>${link.last_stock != null ? link.last_stock : '?'}</b>\n` +
       `Bğ.kâr: <b>${link.margin_percent != null ? `%${link.margin_percent}` : 'varsayılan'}</b>` +
       ` | Bğ.alt limit: <b>${link.floor_price != null ? `$${link.floor_price}` : 'varsayılan'}</b>\n` +
-      `Eğitim: ${effMargin} / ${effFloor}\n` +
+      `🛡 Garanti sınıfı: <b>${W_LABELS[effW] || effW}</b>\n` +
       `Durum: ${link.enabled ? '🟢 aktif' : '🔴 pasif'} (tedarikçi: ${link.supplier_enabled ? '🟢' : '🔴'})` +
       (link.note ? `\nNot: ${link.note}` : '');
 
@@ -382,6 +388,7 @@ function setupAdminHandlers(bot) {
         inline_keyboard: [
           [{ text: '🎯 Bu tedarikçi için kâr %', callback_data: `admin_link_margin_${productId}_${psId}` }],
           [{ text: '⬇️ Bu tedarikçi için alt limit', callback_data: `admin_link_floor_${productId}_${psId}` }],
+          [{ text: `🛡 Garanti sınıfı: ${link.warranty || 'auto'} → değiştir`, callback_data: `admin_link_warranty_${productId}_${psId}` }],
           [{ text: link.enabled ? '🔴 Pasife al' : '🟢 Aktife al', callback_data: `admin_link_toggle_${productId}_${psId}` }],
           [{ text: '↕️ Önceliği değiştir', callback_data: `admin_link_priority_${productId}_${psId}` }],
           [{ text: '🗑 Bağlantıyı sil', callback_data: `admin_link_del_${productId}_${psId}` }],
@@ -395,6 +402,22 @@ function setupAdminHandlers(bot) {
     const [, productId, psId] = ctx.match.map(Number);
     db.prepare('UPDATE product_suppliers SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id = ?').run(psId);
     ctx.answerCbQuery('Durum değişti.').catch(() => {});
+    return bot.handleUpdate({
+      update_id: ctx.update.update_id,
+      callback_query: { ...ctx.callbackQuery, data: `admin_prod_sup_detail_${productId}_${psId}` }
+    });
+  });
+
+  // link-level warranty override: auto → guaranteed → instant → mixed → auto
+  bot.action(/^admin_link_warranty_(\d+)_(\d+)$/, adminMiddleware, (ctx) => {
+    const [, productId, psId] = ctx.match.map(Number);
+    const { LABELS: W_LABELS } = require('../utils/warranty');
+    const link = db.prepare('SELECT warranty FROM product_suppliers WHERE id = ?').get(psId);
+    const order = ['auto', 'guaranteed', 'instant', 'mixed'];
+    const cur = order.indexOf((link && link.warranty) || 'auto');
+    const nextW = order[(cur + 1) % order.length];
+    db.prepare('UPDATE product_suppliers SET warranty = ? WHERE id = ?').run(nextW, psId);
+    ctx.answerCbQuery(`Sınıf: ${W_LABELS[nextW] || nextW}`).catch(() => {});
     return bot.handleUpdate({
       update_id: ctx.update.update_id,
       callback_query: { ...ctx.callbackQuery, data: `admin_prod_sup_detail_${productId}_${psId}` }
@@ -475,6 +498,41 @@ function setupAdminHandlers(bot) {
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard: [[{ text: '❌ İptal', callback_data: `admin_product_detail_${productId}` }]] }
     }).catch(e => {});
+  });
+
+  // 🛡 Garanti sınıfı: garantili ürün SADECE garantili servisten teslim edilir;
+  // anlık ürün garantili stoktan almaz; klasik = filtre yok (eski davranış).
+  bot.action(/^admin_prod_warranty_(\d+)$/, adminMiddleware, (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    const p = db.prepare('SELECT warranty FROM products WHERE id = ?').get(productId);
+    const mark = (w) => ((p.warranty || 'none') === w ? '✅ ' : '') + (w === 'guaranteed' ? '🛡 Garantili' : w === 'instant' ? '⚡ Anlık Kullanım' : '🧩 Klasik (filtresiz)');
+    ctx.editMessageText(
+      '🛡 <b>Garanti sınıfı</b>\n\n' +
+      '🛡 Garantili → teslimat SADECE garantili servislerden\n' +
+      '⚡ Anlık → garantili stok SUNULMAZ ve teslim edilmez\n' +
+      '🧩 Klasik → filtre yok (mevcut davranış)\n\nSeç:',
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: mark('guaranteed'), callback_data: `admin_prod_wset_${productId}_guaranteed` }],
+            [{ text: mark('instant'), callback_data: `admin_prod_wset_${productId}_instant` }],
+            [{ text: mark('none'), callback_data: `admin_prod_wset_${productId}_none` }],
+            [{ text: '🔙 Ürün', callback_data: `admin_product_detail_${productId}` }]
+          ]
+        }
+      }
+    ).catch(e => {});
+  });
+
+  bot.action(/^admin_prod_wset_(\d+)_(none|guaranteed|instant)$/, adminMiddleware, (ctx) => {
+    const productId = parseInt(ctx.match[1], 10);
+    db.prepare('UPDATE products SET warranty = ? WHERE id = ?').run(ctx.match[2], productId);
+    ctx.answerCbQuery('Garanti sınıfı güncellendi ✓').catch(() => {});
+    return bot.handleUpdate({
+      update_id: ctx.update.update_id,
+      callback_query: { ...ctx.callbackQuery, data: `admin_product_detail_${productId}` }
+    });
   });
 
   bot.action(/^admin_prod_del_confirm_(\d+)$/, adminMiddleware, (ctx) => {
@@ -615,6 +673,7 @@ function setupAdminHandlers(bot) {
   // API menu handlers are in admin_api.js
   setupAdminApiHandlers(bot, adminMiddleware);
   require('./admin_suppliers2')(bot, adminMiddleware);
+  require('./admin_catalogpicker')(bot, adminMiddleware);
 
   bot.action(/^admin_api_autobuy(?:_(\d+))?$/, adminMiddleware, (ctx) => {
     const page = parseInt(ctx.match[1] || '1', 10);
@@ -1717,21 +1776,6 @@ function setupAdminHandlers(bot) {
       try {
         db.prepare('INSERT INTO suppliers (name, type, base_url, api_key) VALUES (?, ?, ?, ?)').run(parts[0], parts[1], parts[2], parts[3]);
         ctx.reply(`✅ Tedarikçi başarıyla eklendi!`);
-        ctx.session.adminState = null;
-      } catch(e) { ctx.reply(`❌ Hata: ${e.message}`); }
-    }
-
-    else if (state === 'waiting_link_supplier_service_id') {
-      const remoteId = ctx.message.text.trim();
-      const sId = ctx.session.linkSupplierId;
-      const pId = ctx.session.linkProductId;
-      
-      try {
-        const highestPrio = db.prepare('SELECT MAX(priority) as p FROM product_suppliers WHERE product_id = ?').get(pId).p || 0;
-        const prio = highestPrio + 1;
-        
-        db.prepare('INSERT INTO product_suppliers (product_id, supplier_id, remote_service_id, priority) VALUES (?, ?, ?, ?)').run(pId, sId, remoteId, prio);
-        ctx.reply(`✅ Tedarikçi başarıyla bağlandı! (Öncelik: ${prio})`);
         ctx.session.adminState = null;
       } catch(e) { ctx.reply(`❌ Hata: ${e.message}`); }
     }
