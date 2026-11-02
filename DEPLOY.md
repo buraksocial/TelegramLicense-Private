@@ -180,10 +180,12 @@ DEPOSIT_NETWORKS=usdt_bep20,usdt_polygon,ton,usdt_ton,ltc,usdt_trc20   # opsiyon
 WEB_PUBLIC_URL=https://bot.developer.org.tr   # NOWPayments ipn_callback_url buradan üretilir
 ```
 
-- CoinPayments: kalıcı kişiye özel adres (`create_deposit_address`, label=u<id>);
+- **CoinPayments**: kalıcı kişiye özel adres (`create_deposit_address`, label=u<id>);
   IPN'i hesap panelinde `https://bot.../ipn/coinpayments` olarak kur
   (form-urlencoded, `X-CoinPay-Signature: HMAC-SHA1`).
-- NOWPayments: ödeme başına benzersiz adresli invoice; webhook
+- **NOWPayments PCA** (önerilen): `POST /v1/personal-crypto-address` ile her
+  müşteriye **kalıcı, tekrar kullanılabilir** adres (invoice değil);
+  IPN `customer_id` ile kullanıcı eşleşmesi; webhook
   `https://bot.../ipn/nowpayments` (JSON, `x-nowpayments-sig: HMAC-SHA256`) +
   15 dk'lık polling sweep yedek rail.
 - Kredi tek noktadan: `deposit_events UNIQUE(provider,ref)` → çift ödeme imkânsız;
