@@ -448,7 +448,11 @@ function setupUserHandlers(bot) {
   // Step 1: categories (falls back to a flat product list when none defined)
   bot.action('menu_products', async (ctx) => {
     const lang = getUserLang(ctx.from.id);
-    const cats = db.prepare('SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order, id').all();
+    const cats = db.prepare('SELECT * FROM categories WHERE is_active = 1 AND parent_id IS NULL ORDER BY sort_order, id').all()
+      .filter((c) => db.prepare(`SELECT COUNT(DISTINCT p.id) c FROM products p
+        JOIN product_categories pc ON pc.product_id=p.id
+        LEFT JOIN categories child ON child.id=pc.category_id
+        WHERE (pc.category_id=? OR child.parent_id=?) AND p.is_active=1`).get(c.id, c.id).c > 0);
 
     if (cats.length === 0) return showProductsForCategory(ctx, lang, 0);
 
@@ -456,10 +460,11 @@ function setupUserHandlers(bot) {
     for (let i = 0; i < cats.length; i += 2) {
       const row = cats.slice(i, i + 2).map((c) => {
         const count = db.prepare(
-          `SELECT COUNT(*) c FROM products p
+          `SELECT COUNT(DISTINCT p.id) c FROM products p
            JOIN product_categories pc ON pc.product_id = p.id
-           WHERE pc.category_id = ? AND p.is_active = 1`
-        ).get(c.id).c;
+           LEFT JOIN categories child ON child.id = pc.category_id
+           WHERE (pc.category_id = ? OR child.parent_id = ?) AND p.is_active = 1`
+        ).get(c.id, c.id).c;
         return { text: `${c.emoji || '📂'} ${categoryName(c, lang)} (${count})`, callback_data: `cat_${c.id}` };
       });
       rows.push(row);
@@ -478,7 +483,28 @@ function setupUserHandlers(bot) {
     await showProductsForCategory(ctx, lang, catId);
   });
 
-  async function showProductsForCategory(ctx, lang, catId) {
+  bot.action(/^cat_(\d+)_(\d+)$/, async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    await showProductsForCategory(ctx, lang, parseInt(ctx.match[1], 10), parseInt(ctx.match[2], 10));
+  });
+
+  async function showProductsForCategory(ctx, lang, catId, page = 1) {
+    const current = catId > 0 ? db.prepare('SELECT * FROM categories WHERE id = ? AND is_active = 1').get(catId) : null;
+    const children = current ? db.prepare('SELECT * FROM categories WHERE parent_id = ? AND is_active = 1 ORDER BY sort_order,id').all(catId) : [];
+    if (children.length && page === 1) {
+      const rows = children.filter((child) => db.prepare(`SELECT COUNT(*) c FROM products p JOIN product_categories pc ON pc.product_id=p.id
+        WHERE pc.category_id=? AND p.is_active=1`).get(child.id).c > 0).map((child) => {
+        const count = db.prepare(`SELECT COUNT(*) c FROM products p JOIN product_categories pc ON pc.product_id=p.id
+          WHERE pc.category_id=? AND p.is_active=1`).get(child.id).c;
+        return [{ text: `${child.emoji || '📂'} ${categoryName(child, lang)} (${count})`, callback_data: `cat_${child.id}` }];
+      });
+      rows.push([{ text: t(lang, 'btn_all_products') || '📋 Tümü', callback_data: `cat_${catId}_2` }]);
+      rows.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
+      return ctx.editMessageText(`${current.emoji || '🗂'} <b>${categoryName(current, lang)}</b>\n${t(lang, 'menu_choose_category') || 'Alt kategori seçin:'}`, {
+        parse_mode: 'HTML', reply_markup: { inline_keyboard: rows }
+      }).catch(() => {});
+    }
+
     let products;
     if (catId > 0) {
       products = db.prepare(
@@ -494,12 +520,16 @@ function setupUserHandlers(bot) {
     }
 
     const cat = catId > 0 ? db.prepare('SELECT * FROM categories WHERE id = ?').get(catId) : null;
+    const limit = 8;
+    const pages = Math.max(1, Math.ceil(products.length / limit));
+    page = Math.min(Math.max(1, page), pages);
+    const visibleProducts = products.slice((page - 1) * limit, page * limit);
     const header = cat
       ? `${cat.emoji || '🗂'} <b>${categoryName(cat, lang)}</b>\n${t(lang, 'products_list_msg') || 'Ürünleri seçin:'}`
       : (t(lang, 'products_list_msg') || '🛒 <b>Ürünler:</b>');
 
     const buttons = [];
-    for (const p of products) {
+    for (const p of visibleProducts) {
       const localizedName = getProductName(p, lang);
       const stockCount = db.prepare('SELECT COUNT(*) as count FROM stocks WHERE product_id = ? AND is_sold = 0').get(p.id).count;
 
@@ -542,7 +572,12 @@ function setupUserHandlers(bot) {
       }]);
     }
 
-    if (catId > 0) buttons.push([{ text: t(lang, 'btn_all_products') || '📋 Tümü', callback_data: 'cat_0' }]);
+    const nav = [];
+    if (page > 1) nav.push({ text: t(lang, 'btn_prev') || '⬅️ Önceki', callback_data: `cat_${catId}_${page - 1}` });
+    if (page < pages) nav.push({ text: t(lang, 'btn_next') || 'Sonraki ➡️', callback_data: `cat_${catId}_${page + 1}` });
+    if (nav.length) buttons.push(nav);
+    if (cat && cat.parent_id) buttons.push([{ text: t(lang, 'btn_back_products') || '🔙 Üst kategori', callback_data: `cat_${cat.parent_id}` }]);
+    else if (catId > 0) buttons.push([{ text: t(lang, 'btn_all_products') || '📋 Tümü', callback_data: 'cat_0' }]);
     buttons.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
 
     return ctx.editMessageText(header, {
@@ -608,7 +643,7 @@ function setupUserHandlers(bot) {
     });
 
     const headline = decision.soldOut
-      ? `${localizedName}\n\n🔴 <b>${t(lang, 'badge_sold_out') || 'Şu an tükendi'}</b> — ${t(lang, 'sold_out_hint') || 'tedarikçi bakiyesi/stok yetersiz. Ödeme yapmadan rezerve edebilirsiniz.'}`
+      ? `${localizedName}\n\n🔴 <b>${t(lang, 'badge_sold_out') || 'Şu an tükendi'}</b> — ${t(lang, 'sold_out_hint') || 'tedarikçi bakiyesi/stok yetersiz. Rezervasyon için önce ödeme yapılmalıdır.'}`
       : `${localizedName}\n\n🏷 <b>$${decision.displayUnit.toFixed(2)}</b>\n\n${lines.join('\n')}`;
 
     const keyboard = [...serviceButtons];
@@ -624,6 +659,7 @@ function setupUserHandlers(bot) {
       keyboard.push([{ text: t(lang, 'reserve_btn_label') || '⏳ Rezerve et', callback_data: `resonly_${productId}` }]);
     }
     keyboard.push([{ text: t(lang, 'btn_back_products') || '🔙 Ürünler', callback_data: catBackTarget(productId) }]);
+    keyboard.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
 
     return ctx.editMessageText(headline, {
       parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard }

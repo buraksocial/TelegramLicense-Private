@@ -33,6 +33,12 @@ function productName(product) {
 function categoryFor(name, raw) {
   const text = `${name} ${raw || ''}`.toLowerCase();
   const cats = db.prepare('SELECT * FROM categories WHERE is_active=1 ORDER BY sort_order,id').all();
+  const ai = cats.find((c) => c.slug === 'ai');
+  const brand = [
+    ['ai-gemini', /gemini/], ['ai-chatgpt', /chatgpt|gpt\b/],
+    ['ai-deepseek', /deepseek/], ['ai-claude', /claude/]
+  ].find(([, re]) => re.test(text));
+  if (brand) return cats.find((c) => c.slug === brand[0]) || ai || null;
   const rules = {
     ai: /gemini|chatgpt|claude|\bai\b|yapay zek/,
     streaming: /netflix|spotify|disney|youtube|prime video|canva/,
