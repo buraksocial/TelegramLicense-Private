@@ -117,6 +117,9 @@ async function cpCheckWallet(wallet) {
 }
 
 // ---------------------------------------------------------------- nowpayments
+// NOWPayments Personal Crypto Address (PCA) — kalıcı kişiye özel cüzdan.
+// Her (customer_id, currency) çifti için TEK adres, süresiz, tekrar kullanılabilir.
+// Invoice modelinden farklı: kullanıcı aynı adrese defalarca gönderebilir.
 function npApi(method, path, body) {
   return httpCall({
     method, url: `https://api.nowpayments.io${path}`, data: body,
@@ -124,35 +127,42 @@ function npApi(method, path, body) {
   });
 }
 
+/**
+ * PCA create — idempotent: aynı customer_id+currency zaten varsa mevcut adresi döner.
+ * customer_id = `u<telegram_user_id>` formatında saklanır.
+ */
 async function npCreateWallet(userId, net) {
-  const order = `DP${userId}-${net.key}-${crypto.randomBytes(3).toString('hex')}`;
-  const data = await npApi('POST', '/v1/invoice', {
-    price: 1, currency: 'usd',
-    payment_currency: net.np,
-    order_id: order,
-    order_description: `Store top-up user ${userId}`,
+  const customerId = `u${userId}`;
+  const data = await npApi('POST', '/v1/personal-crypto-address', {
+    customer_id: customerId,
+    currency: net.np,
     ipn_callback_url: PUBLIC_URL ? `${PUBLIC_URL.replace(/\/$/, '')}/ipn/nowpayments` : undefined
   });
-  const inv = data.result || data;
+  const pca = data.result || data;
   return {
     provider: 'nowpayments', network: net.key,
-    address: inv.payment_address || inv.address || null,
+    address: pca.address || null,
     address_extra: null,
-    provider_ref: String(inv.id || ''),
-    url: inv.invoice_url || null,
-    order
+    provider_ref: String(pca.id || ''),
+    url: null, // PCA has no invoice page; address is shown directly
+    customer_id: customerId
   };
 }
 
+/**
+ * PCA payment check — lists recent payments for this address.
+ * Returns the newest 'finished' payment not yet credited (if any).
+ */
 async function npCheckWallet(wallet) {
-  const data = await npApi('GET', `/v1/invoice/${wallet.provider_ref}/check`);
-  const p = data.result || data;
-  const usd = Number(p.outcome_amount || p.price_paid_usd || p.actual_usd_paid || p.price || 0);
-  return {
-    status: ['finished', 'confirmed', 'paid'].includes(String(p.payment_status || '').toLowerCase()) ? 'settled' : 'waiting',
-    usd,
-    raw: p
-  };
+  const data = await npApi('GET', `/v1/personal-crypto-address/${wallet.provider_ref}/payments?limit=20`);
+  const payments = (data.data || data || []);
+  // Find the newest finished payment
+  const finished = payments.find((p) =>
+    ['finished', 'confirmed', 'paid'].includes(String(p.payment_status || '').toLowerCase())
+  );
+  if (!finished) return { status: 'waiting', usd: 0, raw: null };
+  const usd = Number(finished.price_amount || finished.actually_paid || finished.pay_amount || 0);
+  return { status: 'settled', usd, payment_id: finished.payment_id, raw: finished };
 }
 
 // ---------------------------------------------------------------- wallets
@@ -175,13 +185,10 @@ async function getDepositWallet(userId, networkKey) {
     return upsertWallet(userId, w, row);
   }
 
-  // nowpayments — reuse only invoices still waiting for funds
-  if (row && row.status === 'ACTIVE' && row.address) {
-    const st = await npCheckWallet(row).catch(() => null);
-    if (st && st.status === 'waiting') return row;
-  }
+  // nowpayments PCA — kalıcı adres, invoice gibi expire olmaz
+  if (row && row.status === 'ACTIVE' && row.address) return row;
   const w = await npCreateWallet(userId, net);
-  return upsertWallet(userId, Object.assign(w, { order: w.order || null }), row);
+  return upsertWallet(userId, w, row);
 }
 
 function upsertWallet(userId, w, old) {
@@ -204,7 +211,10 @@ const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 /** Pick the USD value out of heterogeneous provider payloads. */
 function extractUsd(ev) {
-  const cands = [ev.outcome_amount, ev.actual_usd_paid, ev.price_paid_usd, ev.amount_usd, ev.fiat_amount, ev.price, ev.amount];
+  const cands = [
+    ev.price_amount, ev.outcome_amount, ev.actual_usd_paid, ev.actually_paid,
+    ev.price_paid_usd, ev.amount_usd, ev.fiat_amount, ev.price, ev.amount
+  ];
   for (const c of cands) {
     const v = Number(c);
     if (v > 0 && v < 1e6) return v;
@@ -267,22 +277,39 @@ function verifyCpSignature(rawBody, sigHeader) {
 }
 
 /**
- * NOWPayments IPN body: { payment_id, order_id:'DP123-usdt_bep20-abc',
- * payment_status, actually_paid, outcome_amount, price, payment_currency }.
+ * NOWPayments PCA IPN body: { payment_id, payment_status, pay_address,
+ * price_amount, actually_paid, pay_currency, customer_id, address_id }.
+ * PCA IPNs have order_id=null — user identified via customer_id or address.
  */
 async function handleNpIpn(body, bot) {
   const status = String(body.payment_status || body.status || '').toLowerCase();
   if (!['finished', 'confirmed', 'paid', 'partial'].includes(status)) return { ignored: status };
-  const om = String(body.order_id || '');
-  let userId = null; let network = null;
-  const parsed = om.match(/^DP(\d+)-(.+)-[0-9a-f]{6}$/);
-  if (parsed) { userId = Number(parsed[1]); network = parsed[2]; }
+
+  // 1) PCA customer_id → u<userId>
+  let userId = null;
+  const cid = String(body.customer_id || '');
+  const cidMatch = cid.match(/^u(\d+)$/);
+  if (cidMatch) userId = Number(cidMatch[1]);
+
+  // 2) Fallback: pay_address → wallet lookup
+  let network = null;
   if (!userId && body.pay_address) {
-    const w = db.prepare("SELECT user_id FROM deposit_wallets WHERE address=? AND provider='nowpayments'").get(body.pay_address);
-    if (w) userId = w.user_id;
+    const w = db.prepare("SELECT user_id, network FROM deposit_wallets WHERE address=? AND provider='nowpayments'").get(body.pay_address);
+    if (w) { userId = w.user_id; network = w.network; }
   }
+  // 3) Fallback: legacy invoice order_id (backward compat)
+  if (!userId) {
+    const om = String(body.order_id || '');
+    const parsed = om.match(/^DP(\d+)-(.+)-[0-9a-f]{6}$/);
+    if (parsed) { userId = Number(parsed[1]); network = parsed[2]; }
+  }
+
   if (!userId) return { ignored: 'no_user' };
-  const ref = String(body.payment_id || `inv${om}`);
+  if (!network && body.pay_currency) {
+    const net = NETWORKS.find((n) => n.np === body.pay_currency);
+    if (net) network = net.key;
+  }
+  const ref = String(body.payment_id || `pca${Date.now()}`);
   return creditDeposit({
     provider: 'nowpayments', ref, userId, usd: round2(extractUsd(body)),
     network, payload: body, bot

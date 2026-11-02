@@ -46,9 +46,10 @@ async function processPending(bot) {
   const tryRate = await getUsdTryRate().catch(() => 47.22);
 
   for (const p of rows) {
-    // TTL — never found in history for 7 days → expired + admin alert
+    // TTL — Binance Pay ödemeleri en geç 24 saatte sonuçlanır; bu sürede
+    // history'ye düşmeyen kayıt EXPIRED + admin alert.
     const age = Date.now() - new Date(`${p.created_at}Z`).getTime();
-    if (age > 7 * DAY) {
+    if (age > 1 * DAY) {
       db.prepare("UPDATE pending_topups SET status='EXPIRED', note=COALESCE(note,'')||' ttl-7d', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(p.id);
       const lang = getUserLang(p.user_id);
       await notify(bot, p.user_id, t(lang, 'payment_not_found') || 'Payment could not be verified.');
@@ -136,9 +137,10 @@ let timer = null;
 let cycles = 0;
 
 /**
- * Provider wallet sweep (NOWPayments invoices — the CP rail is IPN-only):
- * settled invoices credit through the same idempotent DepositProviders path
- * and the one-shot invoice is marked DONE (next request mints a new one).
+ * Provider wallet sweep (NOWPayments PCA — kalıcı adresler):
+ * Her ACTIVE PCA adresi için /payments endpoint'ine bakılır; yeni finished
+ * ödeme varsa kredi edilir (deposit_events dedup sayesinde aynı ödeme
+ * birden fazla kez yüklenmez). Adresler kalıcıdır — DONE'a çekilmez.
  */
 async function sweepProviderWallets(bot) {
   const DepSvc = require('./DepositProviders');
@@ -147,14 +149,14 @@ async function sweepProviderWallets(bot) {
   for (const w of rows) {
     let st = null;
     try { st = await DepSvc.npCheckWallet(w); } catch (e) { continue; }
-    if (!st || st.status !== 'settled') continue;
-    const r = await DepSvc.creditDeposit({
-      provider: 'nowpayments', ref: String(w.provider_ref), userId: w.user_id,
+    if (!st || st.status !== 'settled' || !st.payment_id) continue;
+    // payment_id bazlı dedup: bu ödeme zaten kredilendiyse atla
+    const alreadyCredited = db.prepare("SELECT 1 FROM deposit_events WHERE provider='nowpayments' AND ref=?").get(st.payment_id);
+    if (alreadyCredited) continue;
+    await DepSvc.creditDeposit({
+      provider: 'nowpayments', ref: String(st.payment_id), userId: w.user_id,
       usd: Number(st.usd || 0), network: w.network, payload: st.raw, bot
     });
-    if (r.ok || r.reason === 'dup') {
-      db.prepare("UPDATE deposit_wallets SET status='DONE', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(w.id);
-    }
   }
 }
 
