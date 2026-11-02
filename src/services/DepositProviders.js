@@ -133,20 +133,30 @@ function npApi(method, path, body) {
  */
 async function npCreateWallet(userId, net) {
   const customerId = `u${userId}`;
-  const data = await npApi('POST', '/v1/personal-crypto-address', {
-    customer_id: customerId,
-    currency: net.np,
-    ipn_callback_url: PUBLIC_URL ? `${PUBLIC_URL.replace(/\/$/, '')}/ipn/nowpayments` : undefined
-  });
-  const pca = data.result || data;
-  return {
-    provider: 'nowpayments', network: net.key,
-    address: pca.address || null,
-    address_extra: null,
-    provider_ref: String(pca.id || ''),
-    url: null, // PCA has no invoice page; address is shown directly
-    customer_id: customerId
-  };
+  try {
+    const data = await npApi('POST', '/v1/personal-crypto-address', {
+      customer_id: customerId, currency: net.np,
+      ipn_callback_url: PUBLIC_URL ? `${PUBLIC_URL.replace(/\/$/, '')}/ipn/nowpayments` : undefined
+    });
+    const pca = data.result || data;
+    return { provider: 'nowpayments', network: net.key, address: pca.address || null,
+      address_extra: null, provider_ref: `pca:${String(pca.id || '')}`, url: null, customer_id: customerId };
+  } catch (e) {
+    // PCA is not enabled for every NOWPayments account. Such accounts return
+    // 404 despite having a valid API key; fall back to a normal pay-in.
+    if (e.response?.status !== 404 && e.status !== 404) throw e;
+    const data = await npApi('POST', '/v1/payment', {
+      price_amount: 1, price_currency: 'usd', pay_currency: net.np,
+      order_id: `wallet_${userId}_${net.key}_${Date.now()}`,
+      ipn_callback_url: PUBLIC_URL ? `${PUBLIC_URL.replace(/\/$/, '')}/ipn/nowpayments` : undefined
+    });
+    const payment = data.payment || data;
+    if (!payment.pay_address) throw new Error('NOWPayments bu ağ için yatırım adresi üretmedi');
+    return { provider: 'nowpayments', network: net.key, address: payment.pay_address,
+      address_extra: payment.payin_extra_id || null,
+      provider_ref: `payment:${String(payment.payment_id || payment.id || '')}`,
+      url: payment.invoice_url || null, customer_id: customerId };
+  }
 }
 
 /**
@@ -154,7 +164,17 @@ async function npCreateWallet(userId, net) {
  * Returns the newest 'finished' payment not yet credited (if any).
  */
 async function npCheckWallet(wallet) {
-  const data = await npApi('GET', `/v1/personal-crypto-address/${wallet.provider_ref}/payments?limit=20`);
+  if (String(wallet.provider_ref || '').startsWith('payment:')) {
+    const id = String(wallet.provider_ref).slice('payment:'.length);
+    const data = await npApi('GET', `/v1/payment/${encodeURIComponent(id)}`);
+    const payment = data.payment || data;
+    const status = String(payment.payment_status || payment.status || '').toLowerCase();
+    if (!['finished', 'confirmed', 'paid'].includes(status)) return { status: 'waiting', usd: 0, raw: payment };
+    return { status: 'settled', usd: Number(payment.price_amount || payment.actually_paid || payment.pay_amount || 0),
+      payment_id: payment.payment_id || payment.id, raw: payment };
+  }
+  const ref = String(wallet.provider_ref || '').replace(/^pca:/, '');
+  const data = await npApi('GET', `/v1/personal-crypto-address/${ref}/payments?limit=20`);
   const payments = (data.data || data || []);
   // Find the newest finished payment
   const finished = payments.find((p) =>

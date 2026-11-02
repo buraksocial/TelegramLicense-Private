@@ -505,10 +505,20 @@ function setupUserHandlers(bot) {
       rows.push(row);
     }
     rows.push([{ text: t(lang, 'btn_all_products') || '📋 Tümü', callback_data: 'cat_0' }]);
+    rows.push([{ text: '🔎 Ürün ara', callback_data: 'search_products' }]);
     rows.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
 
     return ctx.editMessageText(t(lang, 'menu_choose_category') || '🗂 <b>Kategori seçin:</b>', {
       parse_mode: 'HTML', reply_markup: { inline_keyboard: rows }
+    }).catch(() => {});
+  });
+
+  bot.action('search_products', async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    ctx.session = ctx.session || {};
+    ctx.session.state = 'waiting_product_search';
+    return ctx.editMessageText('🔎 <b>Ürün ara</b>\n\nÜrün adını yazın:', {
+      parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: t(lang, 'btn_cancel') || '❌ Vazgeç', callback_data: 'menu_products' }]] }
     }).catch(() => {});
   });
 
@@ -666,10 +676,13 @@ function setupUserHandlers(bot) {
       const tag = o.product_supplier_id === (decision.priceOffer && decision.priceOffer.product_supplier_id) ? ' ⭐' : '';
       const wTag = o.warranty === 'guaranteed' ? ' 🛡' : '';
       const svcName = String(TranslationService.translate(o.remote_name || o.supplier_name, lang) || '').slice(0, 38);
-      lines.push(`#${i + 1} ${svcName}: <b>$${price}</b>${tag}${wTag}  ${visible != null ? `(stok ${visible})` : ''}${o.affordable ? '' : ` — ${o.reason === 'insufficient_balance' || o.reason === 'no_balance' ? (t(lang, 'badge_sold_out') || 'tükendi') : o.reason}`}`);
-      if (o.affordable) {
-        serviceButtons.push([{ text: `#${i + 1} — ${price}$ · ${svcName}${wTag}`, callback_data: `svc_${productId}_${o.product_supplier_id}` }]);
-      }
+       const reserveLabel = o.reason === 'insufficient_balance' || o.reason === 'no_balance' ? '⏳ rezervasyon' : o.reason;
+       lines.push(`#${i + 1} ${svcName}: <b>$${price}</b>${tag}${wTag}  ${visible != null ? `(stok ${visible})` : ''}${o.affordable ? '' : ` — ${reserveLabel}`}`);
+       if (o.affordable) {
+         serviceButtons.push([{ text: `#${i + 1} — ${price}$ · ${svcName}${wTag}`, callback_data: `svc_${productId}_${o.product_supplier_id}` }]);
+       } else if (o.reservationOnly) {
+         serviceButtons.push([{ text: `⏳ Rezerve et — ${price}$ · ${svcName}`, callback_data: `resoffer_${productId}_${o.product_supplier_id}` }]);
+       }
       const favorite = !!db.prepare('SELECT 1 FROM user_favorite_services WHERE user_id=? AND product_supplier_id=?')
         .get(ctx.from.id, o.product_supplier_id);
       serviceButtons.push([{ text: favorite ? '★ Favoriden çıkar' : '☆ Favoriye ekle', callback_data: `favtoggle_${productId}_${o.product_supplier_id}` }]);
@@ -699,6 +712,25 @@ function setupUserHandlers(bot) {
     }).catch(() => {});
   });
 
+  bot.action(/^resoffer_(\d+)_(\d+)$/, async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    const productId = Number(ctx.match[1]);
+    const psId = Number(ctx.match[2]);
+    const product = db.prepare('SELECT * FROM products WHERE id=? AND is_active=1').get(productId);
+    if (!product) return ctx.answerCbQuery('Ürün bulunamadı.', { show_alert: true });
+    const decision = await PricingEngine.price(product, { qty: 1 }).catch(() => null);
+    const offer = decision && decision.all.find((o) => o.product_supplier_id === psId);
+    if (!offer || !offer.reservationOnly) return ctx.answerCbQuery('Bu rezervasyon artık kullanılamıyor.', { show_alert: true });
+    ctx.session = ctx.session || {};
+    ctx.session.isReservation = true;
+    ctx.session.isPartialReservation = false;
+    ctx.session.chosenPs = psId;
+    ctx.session.chosenSupplier = offer.supplier_id;
+    ctx.session.baseUnitPrice = offer.sellUnit;
+    ctx.session.priceLockToken = issuePriceLock(ctx, product, { fulfillOffer: offer }, offer.sellUnit);
+    return renderQuantityMenu(ctx, lang, product, 0, offer.sellUnit, true);
+  });
+
   bot.action(/^favtoggle_(\d+)_(\d+)$/, async (ctx) => {
     const productId = Number(ctx.match[1]);
     const psId = Number(ctx.match[2]);
@@ -726,7 +758,13 @@ function setupUserHandlers(bot) {
   });
 
   function catBackTarget(productId) {
-    const pc = db.prepare('SELECT category_id FROM product_categories WHERE product_id = ? ORDER BY category_id LIMIT 1').get(productId);
+    const pc = db.prepare(`WITH RECURSIVE tree(id,parent_id,depth) AS (
+      SELECT id,parent_id,0 FROM categories WHERE parent_id IS NULL
+      UNION ALL SELECT c.id,c.parent_id,t.depth+1 FROM categories c JOIN tree t ON c.parent_id=t.id
+    )
+    SELECT pc.category_id FROM product_categories pc JOIN tree c ON c.id=pc.category_id
+      JOIN categories raw ON raw.id=pc.category_id
+      WHERE pc.product_id=? ORDER BY (raw.slug='other'), c.depth DESC, pc.category_id LIMIT 1`).get(productId);
     return pc ? `cat_${pc.category_id}` : 'menu_products';
   }
 
@@ -1111,7 +1149,19 @@ function setupUserHandlers(bot) {
   bot.on('text', async (ctx, next) => {
     const lang = getUserLang(ctx.from.id);
 
-    if (ctx.session && ctx.session.state === 'waiting_custom_quantity') {
+    if (ctx.session && ctx.session.state === 'waiting_product_search') {
+      const q = ctx.message.text.trim().toLowerCase();
+      ctx.session.state = null;
+      if (!q) return ctx.reply('Arama metni boş olamaz.');
+      ctx.session.lastProductSearch = q;
+      const products = db.prepare('SELECT * FROM products WHERE is_active=1 ORDER BY id').all()
+        .filter((p) => `${p.name || ''} ${p.description || ''}`.toLowerCase().includes(q));
+      const buttons = products.slice(0, 20).map((p) => [{ text: `${getProductName(p, lang).slice(0, 42)} — ${(p.price || 0).toFixed(2)}$`, callback_data: `buy_${p.id}` }]);
+      if (!buttons.length) buttons.push([{ text: 'Sonuç bulunamadı', callback_data: 'search_products' }]);
+      buttons.push([{ text: t(lang, 'btn_back_products') || '🔙 Ürünler', callback_data: 'menu_products' }]);
+      buttons.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
+      return ctx.reply(`🔎 <b>${q}</b> için sonuçlar:`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+    } else if (ctx.session && ctx.session.state === 'waiting_custom_quantity') {
       const input = require('../utils/money').parseQuantity(ctx.message.text);
 
       if (isNaN(input) || input <= 0) {
