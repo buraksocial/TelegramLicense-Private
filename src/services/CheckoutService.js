@@ -142,8 +142,9 @@ function serviceLines(product, decision, lang, userId = null) {
       name,
       sellUnit,
       stock: visible,
-      affordable: o.affordable,
-      reason: o.reason,
+       affordable: o.affordable,
+       reservationOnly: !!o.reservationOnly,
+       reason: o.reason,
       best: !!isBest,
       warranty: o.warranty
     };
@@ -196,17 +197,23 @@ async function fulfill(userId, product, qty, opts) {
     const costUsd = product.cost_usd || 0;
     const profitUsd = paidAmount - costUsd * qty;
 
-    db.prepare(`INSERT INTO reservations (user_id, product_id, qty, fulfilled_qty, cost_usd, sell_usd, profit_usd, cost_try, sell_try, profit_try, unit_price, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?, 'PENDING')`)
+    const waitingPayment = !!opts.unpaidReservation;
+    db.prepare(`INSERT INTO reservations (user_id, product_id, qty, fulfilled_qty, cost_usd, sell_usd, profit_usd, cost_try, sell_try, profit_try, unit_price, status, paid_usd, support_note)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?, ?, ?, ?)`)
       .run(userId, product.id, qty, 0, costUsd, paidAmount, profitUsd,
-        costUsd * qty * tryRate, paidAmount * tryRate, profitUsd * tryRate, reserveUnitPrice);
-    db.prepare('INSERT INTO transactions (txid, user_id, product_id, amount, status, amount_try) VALUES (?,?,?,?,?,?)')
-      .run(txid, userId, product.id, paidAmount, 'SUCCESS', paidAmount * tryRate);
-    db.prepare('INSERT INTO orders (user_id, product_id, qty, cost_usd, sell_usd, profit_usd, cost_try, sell_try, profit_try) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(userId, product.id, qty, costUsd, paidAmount, profitUsd,
-        costUsd * qty * tryRate, paidAmount * tryRate, profitUsd * tryRate);
-    db.prepare('UPDATE users SET total_purchases = total_purchases + ? WHERE id = ?').run(qty, userId);
-    return { kind: 'reservation', order_id: db.prepare('SELECT last_insert_rowid() id').get().id, qty, reserveUnitPrice };
+        costUsd * qty * tryRate, paidAmount * tryRate, profitUsd * tryRate, reserveUnitPrice,
+        waitingPayment ? 'WAITING_PAYMENT' : 'PENDING', waitingPayment ? 0 : paidAmount,
+        waitingPayment ? 'Bakiye geldiğinde otomatik teslim edilecek.' : null);
+    if (!waitingPayment) {
+      db.prepare('INSERT INTO transactions (txid, user_id, product_id, amount, status, amount_try) VALUES (?,?,?,?,?,?)')
+        .run(txid, userId, product.id, paidAmount, 'SUCCESS', paidAmount * tryRate);
+      db.prepare('INSERT INTO orders (user_id, product_id, qty, cost_usd, sell_usd, profit_usd, cost_try, sell_try, profit_try) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(userId, product.id, qty, costUsd, paidAmount, profitUsd,
+          costUsd * qty * tryRate, paidAmount * tryRate, profitUsd * tryRate);
+      db.prepare('UPDATE users SET total_purchases = total_purchases + ? WHERE id = ?').run(qty, userId);
+    }
+    return { kind: waitingPayment ? 'reservation_pending' : 'reservation', order_id: db.prepare('SELECT last_insert_rowid() id').get().id, qty, reserveUnitPrice,
+      message: waitingPayment ? 'Rezervasyon oluşturuldu. Bakiye yüklendiğinde otomatik teslim edilecek. Destek: @MerhabaWorld' : null };
   }
 
   // ---- ensure stock: local + restock/dynamic-direct ----
@@ -360,9 +367,10 @@ async function productSummary(userId, product) {
   return {
     mode,
     unit,
-    stock: stockCount + (decision.soldOut ? 0 : decision.affordable.reduce((a, o) => a + (o.realStock || 0), 0)),
-    soldOut: decision.soldOut,
-    reserve: false,
+     stock: stockCount + (decision.soldOut ? 0 : (decision.reservable || decision.affordable).reduce((a, o) => a + (o.realStock || 0), 0)),
+     soldOut: decision.soldOut,
+     reservationOnly: !!decision.reservationOnly,
+     reserve: !!decision.reservationOnly,
     lang,
     name: localized(product, lang),
     warranty: product.warranty || 'none',

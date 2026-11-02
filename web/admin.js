@@ -246,9 +246,39 @@ async function handleAdmin(req, res, url, sess) {
 
   // ---- reservations ----
   if (M === 'GET' && route === 'reservations') {
-    const rows = db.prepare(`SELECT r.id, r.user_id, r.qty, r.fulfilled_qty, r.sell_usd, r.status, r.created_at, p.name pn
-      FROM reservations r LEFT JOIN products p ON p.id=r.product_id WHERE r.status='PENDING' ORDER BY r.id DESC LIMIT 100`).all();
-    return json(res, 200, { data: rows.map((r) => ({ id: r.id, user: r.user_id, product: CS.localized({ name: r.pn }, 'tr'), qty: r.qty, fulfilled: r.fulfilled_qty, paid: round2(r.sell_usd), date: r.created_at })) });
+    const rows = db.prepare(`SELECT r.id, r.user_id, r.product_id, r.qty, r.fulfilled_qty, r.sell_usd,
+      r.paid_usd, r.status, r.created_at, p.name pn
+      FROM reservations r LEFT JOIN products p ON p.id=r.product_id
+      WHERE r.status IN ('WAITING_PAYMENT','PENDING','PARTIAL') ORDER BY r.id DESC LIMIT 100`).all();
+    return json(res, 200, { data: rows.map((r) => ({ id: r.id, user: r.user_id, product_id: r.product_id,
+      product: CS.localized({ name: r.pn }, 'tr'), qty: r.qty, fulfilled: r.fulfilled_qty,
+      paid: round2(r.paid_usd || 0), total: round2(r.sell_usd || 0), status: r.status, date: r.created_at })) });
+  }
+
+  // Admin can manually deliver items already held in the reservation queue.
+  // The payload is intentionally explicit: { data: ["item-1", "item-2"] }.
+  let rm = route.match(/^reservations\/(\d+)\/deliver$/);
+  if (M === 'POST' && rm) {
+    const reservation = db.prepare('SELECT * FROM reservations WHERE id=?').get(Number(rm[1]));
+    if (!reservation) return json(res, 404, { error: 'rezervasyon bulunamadı' });
+    const items = Array.isArray(body.data) ? body.data.map(String).filter(Boolean) : [];
+    const remaining = reservation.qty - reservation.fulfilled_qty;
+    if (!items.length || items.length > remaining) return json(res, 400, { error: `en fazla ${remaining} ürün gönderilebilir` });
+    const next = reservation.fulfilled_qty + items.length;
+    const status = next >= reservation.qty ? 'COMPLETED' : 'PARTIAL';
+    let old = [];
+    try { old = JSON.parse(reservation.delivered_data || '[]'); } catch (e) {}
+    db.transaction(() => {
+      db.prepare(`UPDATE reservations SET fulfilled_qty=?, status=?, delivered_data=?, support_note=? WHERE id=?`)
+        .run(next, status, JSON.stringify(old.concat(items)), 'Admin tarafından manuel teslim edildi.', reservation.id);
+      for (const item of items) db.prepare('INSERT INTO stocks (product_id,data,is_sold) VALUES (?,?,1)').run(reservation.product_id, item);
+    })();
+    try {
+      const bot = global.__LICENSE_BOT;
+      if (bot && bot.telegram) await bot.telegram.sendMessage(reservation.user_id,
+        `✅ Rezervasyon #${reservation.id} için ${items.length} ürün manuel teslim edildi.`);
+    } catch (e) {}
+    return json(res, 200, { ok: true, id: reservation.id, status, delivered: items.length });
   }
 
   // ---- pending binance top-ups (auto-verified by DepositPoller) ----

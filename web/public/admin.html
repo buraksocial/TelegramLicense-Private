@@ -246,9 +246,17 @@ async function vMatches(){
 async function vReservations(){
   $('#view').innerHTML='<div class="card">…</div>';
   var d = await adm('reservations');
-  $('#view').innerHTML = '<div class="card"><h3 style="margin:0 0 10px">⏳ Bekleyen Rezervasyonlar (iptal/tamamlama bot üzerinden)</h3><table><tr><th>#</th><th>Kullanıcı</th><th>Ürün</th><th>Adet</th><th>Karşılanan</th><th>Ödenen</th><th>Tarih</th></tr>'
-   + (d.data.length?d.data.map(function(r){return '<tr><td>'+r.id+'</td><td>'+r.user+'</td><td>'+esc(r.product)+'</td><td>'+r.qty+'</td><td>'+r.fulfilled+'</td><td>'+money(r.paid)+'</td><td class="mut">'+(r.date||'')+'</td></tr>'}).join(''):'<tr><td colspan="7" class="mut">yok</td></tr>')
-   + '</table></div>';
+   $('#view').innerHTML = '<div class="card"><h3 style="margin:0 0 10px">⏳ Bekleyen Rezervasyonlar</h3><p class="mut">Bakiye geldiğinde otomatik teslim edilir. Manuel teslim için ürünleri alt alta girin.</p><table><tr><th>#</th><th>Kullanıcı</th><th>Ürün</th><th>Adet</th><th>Karşılanan</th><th>Ödenen</th><th>Durum</th><th>Tarih</th></tr>'
+    + (d.data.length?d.data.map(function(r){return '<tr><td>'+r.id+'</td><td>'+r.user+'</td><td>'+esc(r.product)+'</td><td>'+r.qty+'</td><td>'+r.fulfilled+'</td><td>'+money(r.paid)+' / '+money(r.total)+'</td><td>'+esc(r.status)+' <button class="gh" onclick="manualReserve('+r.id+','+(r.qty-r.fulfilled)+')">Manuel teslim</button></td><td class="mut">'+(r.date||'')+'</td></tr>'}).join(''):'<tr><td colspan="8" class="mut">yok</td></tr>')
+    + '</table></div>';
+   window.manualReserve = async function(id, max){
+     var raw=prompt('Teslim edilecek ürünleri satır satır girin (en fazla '+max+')');
+     if(raw===null)return;
+     var data=raw.split(/\r?\n/).map(function(x){return x.trim()}).filter(Boolean);
+     if(!data.length)return toast('ürün girilmedi');
+     try{await adm('reservations/'+id+'/deliver',{method:'POST',body:JSON.stringify({data:data})});toast('manuel teslim tamamlandı ✅');vReservations();}
+     catch(e){toast(e.message);}
+   };
 }
 
 // ---------------------------------------------------------------- api keys

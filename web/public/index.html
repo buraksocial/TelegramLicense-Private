@@ -129,8 +129,8 @@ function renderProducts(){
   $('#view').innerHTML='<div class="grid">'+list.map(p=>{
     const badge=p.sold_out?`<span class="badge">${t('sold_out')}</span>`:
       (p.warranty==='guaranteed'?`<span class="badge warr">🛡</span>`:'');
-    return `<div class="card" data-id="${p.id}"><h3>${esc(p.name)}</h3>
-    <div class="row"><span class="price">${money(p.price)}</span><span>${badge}</span></div>
+     return `<div class="card" data-id="${p.id}"><h3>${esc(p.name)}</h3>
+     <div class="row"><span class="price">${money(p.price)}</span><span>${badge}</span></div>
     <div class="stock">${t('stock')}: ${p.stock}</div></div>`}).join('')+'</div>';
   document.querySelectorAll('.card').forEach(c=>c.onclick=()=>openProduct(+c.dataset.id));
 }
@@ -140,37 +140,39 @@ async function openProduct(id){
   $('#view').innerHTML='<p class="muted">…</p>';
   let d;try{d=await api('product/'+id)}catch(e){toast(e.message);return loadShell()}
   state.product=d;state.decision=null;state.lock=null;
-  const p=d.product,s=d.summary;
+   const p=d.product,s=d.summary;
+   const reservationOnly=!!s.reservation_only;
   let svcHtml='';
   if(d.services&&d.services.length){
     svcHtml=`<h4 style="margin:14px 0 4px">${t('svc')}</h4>`+d.services.map(sv=>{
       const off=!sv.affordable;
-      return `<div class="svc${off?' off':''}${sv.best?' sel':''}" data-ps="${sv.ps_id||''}" data-best="${sv.best?1:0}">
+       return `<div class="svc${off?' off':''}${sv.best?' sel':''}" data-ps="${sv.ps_id||''}" data-best="${sv.best?1:0}">
       <span class="n">#${sv.index} ${esc(sv.name)} ${sv.best?'⭐':''}${sv.warranty==='guaranteed'?' 🛡':sv.warranty==='instant'?' ⚡':''}</span>
-      <span class="p">${off?('— '+(t('sold_out'))):money(sv.price)+(sv.stock!=null?` <small class="muted">(${t('stock')} ${sv.stock})</small>`:'')}</span></div>`}).join('');
+       <span class="p">${off?(sv.reservation_only?('⏳ '+t('reserve')):('— '+(t('sold_out')))):money(sv.price)+(sv.stock!=null?` <small class="muted">(${t('stock')} ${sv.stock})</small>`:'')}</span></div>`}).join('');
   }
   const buyPrice=s.price;
   $('#view').innerHTML=`<button class="ghost" id="bBack">${t('back')}</button>
   <h2 style="margin:12px 0 4px">${esc(p.name)} ${p.warranty==='guaranteed'?'🛡':''}</h2>
   <div class="price" style="font-size:22px">${money(buyPrice)} ${s.sold_out?`<span class="badge">${t('sold_out')}</span>`:''}</div>
   ${p.description?`<div class="desc">${esc(p.description)}</div>`:''}${svcHtml}
-  <div class="rowbtns"><button id="bBuy" ${''}>${s.sold_out?t('reserve'):t('buy')}</button></div>`;
+   <div class="rowbtns"><button id="bBuy" ${''}>${s.sold_out||reservationOnly?t('reserve'):t('buy')}</button></div>
+   ${reservationOnly&&!s.sold_out?`<p class="login-error">📦 Stok mevcut. Tedarikçi bakiyesi yenilenene kadar rezerve edilir; bakiye geldiğinde otomatik teslim edilir. Destek: <a href="https://t.me/MerhabaWorld" target="_blank" rel="noopener">@MerhabaWorld</a></p>`:''}`;
   $('#bBack').onclick=loadShell;
   let sel=d.services?d.services.find(x=>x.best)||d.services.find(x=>x.affordable):null;
-  document.querySelectorAll('.svc:not(.off)').forEach(el=>el.onclick=()=>{
+   document.querySelectorAll('.svc').forEach(el=>el.onclick=()=>{
     document.querySelectorAll('.svc').forEach(x=>x.classList.remove('sel'));
     el.classList.add('sel');
     sel={ps_id:+el.dataset.ps||null,best:el.dataset.best==='1',price:parseFloat(el.querySelector('.p').textContent)};
     const pr=el.querySelector('.p').textContent.match(/([\d.]+)\$/);
     if(pr){$('#bBuy').closest('main').querySelector('.price').innerHTML=el.querySelector('.p').textContent.split('<')[0];}
     state.decision=sel;});
-  $('#bBuy').onclick=()=>openCheckout(sel);
+   $('#bBuy').onclick=()=>openCheckout(sel, reservationOnly||s.sold_out);
 }
 
-async function openCheckout(sel){
-  const d=state.product;const s=d.summary;
+async function openCheckout(sel, forceReserve=false){
+  const d=state.product;const s=d.summary;const canReserve=true;
   let unit=s.price,lock=null;
-  if(sel){ // dynamic service chosen -> lock it
+   if(sel){ // dynamic service chosen -> lock it
     try{const r=await api('lock',{method:'POST',body:JSON.stringify({product_id:d.product.id,ps_id:sel.ps_id||undefined,best:!!sel.best})});
       lock=r.token;unit=r.unit;}catch(e){toast(e.message);return}}
   const sheet=$('#sheet');
@@ -181,15 +183,15 @@ async function openCheckout(sel){
   <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
     ${[1,5,10,20,50,100].map(q=>`<button class="ghost qb" data-q="${q}" style="padding:8px 12px">${q}</button>`).join('')}</div>
   <div class="rowbtns" style="margin-top:14px">
-    ${s.sold_out?`<label style="display:flex;align-items:center;gap:8px;width:100%;font-size:14px"><input type="checkbox" id="bBuyReserveOn" style="width:auto" checked> ${t('reserve')}</label>`:''}
-    <button id="payBal" ${state.me&&state.me.balance<unit?'disabled':''}>${t('pay_bal')} (${money(state.me?state.me.balance:0)})</button>
+     ${(s.sold_out||forceReserve||canReserve)?`<label style="display:flex;align-items:center;gap:8px;width:100%;font-size:14px"><input type="checkbox" id="bBuyReserveOn" style="width:auto" checked> ${t('reserve')}</label>`:''}
+     <button id="payBal" ${!forceReserve&&state.me&&state.me.balance<unit?'disabled':''}>${t('pay_bal')} (${money(state.me?state.me.balance:0)})</button>
     <button class="ghost" id="payBn">${t('pay_bn')}</button>
     <button class="ghost" id="cancel">❌</button>
   </div>${state.me&&state.me.balance<0?`<p style="color:#e5484d;font-size:13px;margin:6px 0 0">⚠️ ${t('caride_note')}</p>`:''}<div id="bnBox" style="display:none"><label>TXID</label><input id="inTx" placeholder="işlem hash/id"><button id="bnGo" style="margin-top:8px">${t('pay')}</button></div>`;
   $('#modal').classList.add('on');
   const qtyEl=$('#inQty');
-  const upd=()=>{$('#tt').textContent=money(Number(qtyEl.value||1)*unit);
-    $('#payBal').disabled=state.me.balance<Number(qtyEl.value||1)*unit};
+   const upd=()=>{$('#tt').textContent=money(Number(qtyEl.value||1)*unit);
+     $('#payBal').disabled=!(forceReserve||canReserve)&&state.me.balance<Number(qtyEl.value||1)*unit};
   qtyEl.oninput=upd;document.querySelectorAll('.qb').forEach(b=>b.onclick=()=>{qtyEl.value=b.dataset.q;upd()});upd();
   $('#cancel').onclick=closeModal;
   const pay=async(pmethod,extra)=>{
@@ -209,8 +211,9 @@ async function openCheckout(sel){
 }
 function closeModal(){$('#modal').classList.remove('on')}
 function renderDelivered(r){
-  if(r.kind==='queued'||r.kind==='topped_up'){
-    $('#view').innerHTML=`<h2>${r.kind==='queued'?t('queued_t'):t('credited_t')}</h2><div class="order"><p style="margin:0">${esc(r.message||'')}</p></div>
+   if(r.kind==='queued'||r.kind==='topped_up'||r.kind==='reservation_pending'){
+     const title=r.kind==='reservation_pending'?'⏳ Rezervasyon oluşturuldu':(r.kind==='queued'?t('queued_t'):t('credited_t'));
+     $('#view').innerHTML=`<h2>${title}</h2><div class="order"><p style="margin:0">${esc(r.message||'')}</p></div>
     <div class="rowbtns"><button class="ghost" onclick="loadShell()">${t('back')}</button></div>`;
     return;
   }

@@ -33,11 +33,30 @@ class ReservationManager {
     this.isRunning = true;
 
     try {
-      // 1. Group active reservations by product_id
+      // Charge unpaid reservations as soon as the user's balance is enough.
+      // They must not trigger a supplier purchase before payment is collected.
+      const waiting = db.prepare(`SELECT * FROM reservations
+        WHERE status='WAITING_PAYMENT' ORDER BY created_at ASC`).all();
+      for (const r of waiting) {
+        const remaining = r.qty - r.fulfilled_qty;
+        const user = db.prepare('SELECT balance FROM users WHERE id=?').get(r.user_id);
+        const due = Number(r.unit_price || 0) * remaining;
+        if (remaining > 0 && user && Number(user.balance || 0) >= due) {
+          db.transaction(() => {
+            db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(due, r.user_id);
+            db.prepare("UPDATE reservations SET status='PENDING', paid_usd=COALESCE(paid_usd,0)+?, support_note=NULL WHERE id=?").run(due, r.id);
+            db.prepare('INSERT INTO transactions (txid,user_id,product_id,amount,status) VALUES (?,?,?,?,?)')
+              .run(`RESERVE_${r.id}_${Date.now()}`, r.user_id, r.product_id, due, 'SUCCESS');
+          })();
+          try { if (this.bot?.telegram) await this.bot.telegram.sendMessage(r.user_id, `✅ Rezervasyon #${r.id} için bakiye tahsil edildi. Ürün tedarik ediliyor; otomatik teslim yapılacak.`); } catch (e) {}
+        }
+      }
+
+      // 1. Group paid reservations by product_id
       const activeReservations = db.prepare(`
         SELECT product_id, SUM(qty - fulfilled_qty) as needed_qty 
         FROM reservations 
-        WHERE status IN ('PENDING', 'PARTIAL') 
+        WHERE status IN ('PENDING', 'PARTIAL')
         GROUP BY product_id
       `).all();
 

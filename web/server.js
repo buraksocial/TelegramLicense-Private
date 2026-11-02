@@ -247,7 +247,8 @@ async function handleApi(req, res, url) {
           ...publicProduct(p, blang),
           price: summaries.get(p.id).unit,
           stock: summaries.get(p.id).stock,
-          sold_out: !!summaries.get(p.id).soldOut,
+           sold_out: !!summaries.get(p.id).soldOut,
+           reservation_only: !!summaries.get(p.id).reservationOnly,
           pricing_mode: summaries.get(p.id).mode
         }))
       };
@@ -265,13 +266,14 @@ async function handleApi(req, res, url) {
       const summary = uid ? await CS.productSummary(uid, product) : null;
       const body = {
         product: publicProduct(product, blang),
-        summary: summary ? { price: summary.unit, stock: summary.stock, sold_out: summary.soldOut, mode: summary.mode } :
+         summary: summary ? { price: summary.unit, stock: summary.stock, sold_out: summary.soldOut, reservation_only: !!summary.reservationOnly, mode: summary.mode } :
           { price: round2(product.price), stock: db.prepare('SELECT COUNT(*) c FROM stocks WHERE product_id=? AND is_sold=0').get(product.id).c, sold_out: false, mode: product.pricing_mode || 'manual' }
       };
       if (summary && summary.decision) {
         body.services = CS.serviceLines(product, summary.decision, blang, uid).map((s) => ({
           index: s.index, ps_id: s.psId, name: s.name, price: s.sellUnit,
-          stock: s.stock, affordable: s.affordable, best: s.best, warranty: s.warranty
+           stock: s.stock, affordable: s.affordable, best: s.best, warranty: s.warranty,
+           reservation_only: !!s.reservationOnly
         }));
       }
       return json(res, 200, body);
@@ -347,7 +349,8 @@ async function handleApi(req, res, url) {
     if (!decision) return json(res, 500, { error: 'pricing unavailable' });
     let offer = null;
     if (body.ps_id) {
-      offer = decision.all.find((o) => o.product_supplier_id === Number(body.ps_id) && o.affordable && o.reason !== 'warranty_mismatch');
+       offer = decision.all.find((o) => o.product_supplier_id === Number(body.ps_id) &&
+         (o.affordable || decision.reservable.includes(o)) && o.reason !== 'warranty_mismatch');
     } else {
       offer = decision.priceOffer;
     }
@@ -387,7 +390,14 @@ async function handleApi(req, res, url) {
     try {
       if (pay === 'balance') {
         const bal = round2(user.balance || 0);
-        if (bal < total) return json(res, 402, { error: `bakiye yetersiz (bakiye: ${bal}$, gereken: ${total}$)` });
+        if (bal < total && !body.reserve) return json(res, 402, { error: `bakiye yetersiz (bakiye: ${bal}$, gereken: ${total}$). Rezervasyon seçebilir veya @MerhabaWorld ile görüşebilirsiniz.` });
+        if (bal < total && body.reserve) {
+          result = await CS.fulfill(userId, product, qty, {
+            paidAmount: total, unitBase, chosenPs: lock ? lock.psId : null, txid,
+            isReservation: true, unpaidReservation: true, source: 'web'
+          });
+          return json(res, 200, result);
+        }
         db.prepare('UPDATE users SET balance = balance - ? WHERE id = ?').run(total, userId);
         try {
           result = await CS.fulfill(userId, product, qty, {

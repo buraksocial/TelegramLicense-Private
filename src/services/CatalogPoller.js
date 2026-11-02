@@ -49,6 +49,8 @@ class CatalogPoller {
           const services = await CatalogStore.getCatalog(supplier, { force: true });
           if (services) {
             this.mirrorLinks(supplier.id, services);
+            try { await require('./AutoCatalogAgent').syncSupplier(supplier, services); }
+            catch (e) { console.error(`[AutoCatalogAgent] ${supplier.name}:`, e.message); }
             db.prepare('UPDATE suppliers SET last_error = NULL, last_ok_at = ? WHERE id = ?').run(
               new Date().toISOString(), supplier.id
             );

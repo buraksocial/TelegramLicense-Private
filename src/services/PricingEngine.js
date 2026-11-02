@@ -167,6 +167,7 @@ class PricingEngine {
         price_protected: !!supplier.price_protected,
         delivery_mode: supplier.delivery_mode || 'instant',
         affordable: reason === null,
+        reservationOnly: reason === 'no_balance' || reason === 'insufficient_balance',
         reason
       });
     }
@@ -179,17 +180,25 @@ class PricingEngine {
    */
   static decide(product, offers) {
     const affordable = offers.filter((o) => o.affordable);
+    // A service with stock but without supplier balance remains orderable as a
+    // reservation. Keep its margin/floor price visible instead of hiding it.
+    const reservable = offers.filter((o) =>
+      (o.reservationOnly || o.affordable) &&
+      o.reason !== 'warranty_mismatch' &&
+      (o.realStock === null || o.realStock === undefined || o.realStock >= 1)
+    );
     const mode = product.pricing_mode || 'max_profit';
     const fmode = product.supplier_selection_mode || 'cheapest';
 
     let priceOffer = null;
-    if (affordable.length) {
+    if (affordable.length || reservable.length) {
+      const candidates = affordable.length ? affordable : reservable;
       if (mode === 'manual') priceOffer = null;
       else if (mode === 'cheapest') {
-        priceOffer = [...affordable].sort((a, b) => a.sellUnit - b.sellUnit || b.marginPct - a.marginPct)[0];
+        priceOffer = [...candidates].sort((a, b) => a.sellUnit - b.sellUnit || b.marginPct - a.marginPct)[0];
       } else {
         // max_profit: highest sellUnit; tie -> higher marginPct; tie -> cheaper cost
-        priceOffer = [...affordable].sort(
+        priceOffer = [...candidates].sort(
           (a, b) => b.sellUnit - a.sellUnit || b.marginPct - a.marginPct || a.cost - b.cost
         )[0];
       }
@@ -203,7 +212,8 @@ class PricingEngine {
     }
 
     const displayUnit = mode === 'manual' ? round2(product.price) : priceOffer ? priceOffer.sellUnit : null;
-    const soldOut = affordable.length === 0;
+    const reservationOnly = affordable.length === 0 && reservable.length > 0;
+    const soldOut = affordable.length === 0 && reservable.length === 0;
 
     // Stock masking: if we fulfil from a cheaper source than the price-setter,
     // show the source's stock BELOW the price-setter's so it isn't obvious.
@@ -226,9 +236,11 @@ class PricingEngine {
       fulfillment_mode: fmode,
       displayUnit,
       soldOut,
+      reservationOnly,
       priceOffer,
       fulfillOffer,
       affordable,
+      reservable,
       all: offers,
       maskedStock: masked
     };
