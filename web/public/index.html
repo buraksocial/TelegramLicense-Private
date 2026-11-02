@@ -5,43 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mağaza</title>
 <style>
-:root{--bg:#0e1621;--card:#17212b;--chip:#232e3c;--txt:#eef2f6;--mut:#8a97a5;--acc:#2b9df4;--ok:#3ec07a;--warn:#f6a13c;--bad:#ef5350}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 -apple-system,'Segoe UI',Roboto,sans-serif}
-header{position:sticky;top:0;background:var(--card);display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #0006;z-index:5}
-header .logo{font-weight:700;font-size:17px}header .sp{flex:1}
-.balance{background:var(--chip);padding:6px 12px;border-radius:20px;font-size:13px}
-nav.cats{display:flex;gap:8px;overflow-x:auto;padding:12px 16px 4px}
-.chip{white-space:nowrap;background:var(--card);border:1px solid #ffffff18;color:var(--txt);padding:7px 14px;border-radius:20px;cursor:pointer;font-size:13.5px}
-.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
-main{padding:10px 12px 90px;max-width:920px;margin:0 auto}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-top:8px}
-.card{background:var(--card);border-radius:14px;padding:14px;cursor:pointer;border:1px solid #ffffff10;transition:.15s}
-.card:hover{border-color:var(--acc)}
-.card h3{margin:0 0 6px;font-size:15px;font-weight:600}
-.card .row{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
-.price{color:var(--acc);font-weight:700;font-size:17px}
-.stock{color:var(--mut);font-size:12.5px}
-.badge{font-size:11px;padding:3px 9px;border-radius:12px;background:#ef535022;color:var(--bad);border:1px solid #ef535044}
-.badge.warr{background:#3ec07a22;color:var(--ok);border-color:#3ec07a44}
-button{background:var(--acc);border:0;color:#fff;padding:11px 18px;border-radius:11px;font-size:14.5px;cursor:pointer;font-weight:600}
-button.ghost{background:var(--chip)}button:disabled{opacity:.45;cursor:default}
-.rowbtns{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
-.svc{display:flex;justify-content:space-between;align-items:center;background:var(--card);padding:12px 14px;border-radius:12px;margin:7px 0;border:1px solid #ffffff12;cursor:pointer}
-.svc.sel{border-color:var(--acc);background:#2b9df412}
-.svc.off{opacity:.5;cursor:default}
-.svc .n{font-size:14px}.svc .p{font-weight:700;color:var(--acc)}
-.desc{background:var(--card);border-radius:12px;padding:12px 14px;white-space:pre-wrap;font-size:13.5px;color:#c8d2dc;margin:8px 0}
-.modal{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
-.modal.on{display:flex}.sheet{background:var(--card);border-radius:16px;padding:18px;max-width:440px;width:100%;max-height:86vh;overflow:auto}
-input,select{background:var(--chip);border:1px solid #ffffff22;color:var(--txt);padding:11px;border-radius:10px;font-size:15px;width:100%}
-label{display:block;font-size:12.5px;color:var(--mut);margin:10px 0 4px}
-.order{background:var(--card);border-radius:12px;padding:12px 14px;margin:8px 0;border:1px solid #ffffff12;font-size:13.5px}
-.order .hd{display:flex;justify-content:space-between}.order code{color:var(--ok);word-break:break-all;font-size:12px}
-.st{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--chip)}
-.st.ok{color:var(--ok)}.st.pend{color:var(--warn)}
-.muted{color:var(--mut);font-size:12.5px}
-.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#000d;color:#fff;padding:12px 20px;border-radius:12px;display:none;z-index:50;max-width:90vw}
-a{color:var(--acc)}
+:root{color-scheme:dark;--bg:#0b1020;--surface:#111a2e;--card:#151f35;--line:#ffffff14;--chip:#1c2940;--txt:#f4f7fc;--mut:#9aa9bf;--acc:#7c8cff;--ok:#42d6a4;--warn:#f6b85f;--bad:#ff727e;--shadow:0 18px 50px #0005}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% -20%,#25365c 0,transparent 48%),var(--bg);color:var(--txt);font:15px/1.55 Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;letter-spacing:.01em}
+header{position:sticky;top:0;background:#10182bed;backdrop-filter:blur(18px);display:flex;align-items:center;gap:12px;padding:14px clamp(16px,4vw,48px);border-bottom:1px solid var(--line);z-index:5}
+header .logo{font-weight:750;font-size:18px;letter-spacing:-.03em}header .sp{flex:1}.balance{background:#17243a;border:1px solid var(--line);padding:7px 13px;border-radius:999px;font-size:13px}
+nav.cats{display:flex;gap:9px;overflow-x:auto;padding:20px clamp(16px,4vw,48px) 6px;scrollbar-width:none}.chip{white-space:nowrap;background:#121c30;border:1px solid var(--line);color:#c5d0e2;padding:8px 15px;border-radius:999px;cursor:pointer;font-size:13.5px;transition:.18s}.chip:hover,.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
+main{padding:22px clamp(16px,4vw,48px) 90px;max-width:1320px;margin:0 auto}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,255px),1fr));gap:16px;margin-top:8px}
+.card{background:linear-gradient(145deg,#17233b,#121b2e);border-radius:18px;padding:20px;cursor:pointer;border:1px solid var(--line);box-shadow:0 8px 24px #0002;transition:transform .2s,border-color .2s,box-shadow .2s}.card:hover{transform:translateY(-3px);border-color:#7c8cff88;box-shadow:var(--shadow)}.card h3{margin:0 0 12px;font-size:16px;font-weight:650;letter-spacing:-.015em}.card .row{display:flex;align-items:center;justify-content:space-between;margin-top:12px}.price{color:#9cafff;font-weight:750;font-size:19px}.stock{color:var(--mut);font-size:12.5px}.badge{font-size:11px;padding:4px 9px;border-radius:999px;background:#ff727e18;color:var(--bad);border:1px solid #ff727e35}.badge.warr{background:#42d6a418;color:var(--ok);border-color:#42d6a435}
+button{background:var(--acc);border:1px solid transparent;color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;cursor:pointer;font-weight:650;transition:filter .15s,transform .15s}button:hover{filter:brightness(1.1);transform:translateY(-1px)}button.ghost{background:#1b2940;border-color:var(--line);color:#e5ebf5}button:disabled{opacity:.45;cursor:default;transform:none}.rowbtns{display:flex;gap:9px;flex-wrap:wrap;margin:12px 0}
+.svc{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#121c30;padding:14px 16px;border-radius:14px;margin:9px 0;border:1px solid var(--line);cursor:pointer}.svc.sel{border-color:var(--acc);background:#7c8cff13}.svc.off{opacity:.5;cursor:default}.svc .n{font-size:14px}.svc .p{font-weight:700;color:#a5b5ff;text-align:right}.desc{background:#121c30;border:1px solid var(--line);border-radius:14px;padding:16px;white-space:pre-wrap;font-size:14px;color:#c8d2dc;margin:12px 0}
+.modal{position:fixed;inset:0;background:#050914c9;backdrop-filter:blur(7px);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}.modal.on{display:flex}.sheet{background:linear-gradient(145deg,#19243a,#121b2e);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:20px;padding:22px;max-width:480px;width:100%;max-height:86vh;overflow:auto}
+input,select{background:#0e1729;border:1px solid #ffffff20;color:var(--txt);padding:12px 13px;border-radius:11px;font-size:15px;width:100%}input:focus,select:focus{outline:2px solid #7c8cff66;border-color:var(--acc)}label{display:block;font-size:12.5px;color:var(--mut);margin:11px 0 5px}.order{background:#121c30;border-radius:14px;padding:14px 16px;margin:9px 0;border:1px solid var(--line);font-size:13.5px}.order .hd{display:flex;justify-content:space-between;gap:10px}.order code{color:var(--ok);word-break:break-all;font-size:12px}.st{font-size:11px;padding:3px 9px;border-radius:10px;background:var(--chip)}.st.ok{color:var(--ok)}.st.pend{color:var(--warn)}.muted{color:var(--mut);font-size:13px}.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#17233b;color:#fff;padding:12px 20px;border:1px solid var(--line);box-shadow:var(--shadow);border-radius:12px;display:none;z-index:50;max-width:90vw}a{color:#a5b5ff}
+.login-wrap{max-width:1080px;margin:clamp(28px,8vh,88px) auto;display:grid;grid-template-columns:1.1fr .9fr;overflow:hidden;border:1px solid var(--line);border-radius:26px;background:#121c30;box-shadow:var(--shadow);min-height:440px}.login-brand{padding:clamp(28px,5vw,58px);display:flex;flex-direction:column;justify-content:space-between;background:radial-gradient(ellipse at 15% 10%,#7c8cff45,transparent 50%),linear-gradient(145deg,#1b2944,#121b2e)}.login-brand h1{font-size:clamp(30px,4vw,48px);line-height:1.08;letter-spacing:-.05em;margin:0 0 16px}.login-brand p{max-width:440px;color:#b8c5d9;font-size:15px}.login-mark{font-size:13px;color:#b8c5d9}.login-panel{padding:clamp(26px,4vw,48px);display:flex;flex-direction:column;justify-content:center}.login-panel h2{font-size:23px;letter-spacing:-.03em;margin:0 0 6px}.login-panel .muted{margin:0 0 22px}.login-error{padding:12px 14px;border-radius:12px;background:#ffb85c12;border:1px solid #ffb85c33;color:#f6c779;margin:8px 0;font-size:13px}
+@media(max-width:680px){header{padding:11px 14px;gap:7px}header .logo{font-size:16px}header button{padding:8px 10px;font-size:12px}nav.cats{padding:14px 14px 4px}main{padding:18px 14px 72px}.grid{grid-template-columns:1fr 1fr;gap:10px}.card{padding:15px;border-radius:15px}.card h3{font-size:14px}.price{font-size:17px}.login-wrap{grid-template-columns:1fr;margin:24px 14px;border-radius:20px}.login-brand{padding:25px;min-height:190px}.login-brand h1{font-size:32px}.login-panel{padding:25px}.sheet{padding:18px}}@media(max-width:390px){.grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -115,9 +91,20 @@ async function loadShell(){
 }
 function renderLogin(){
   const botU = state.botUsername || null;
-  $('#view').innerHTML=`<div class="sheet" style="max-width:420px;margin:8vh auto"><h2>${t('login_h')}</h2><p class="muted">${t('login_p')}</p>
-  ${botU?`<script async src="https://telegram.org/js/telegram-widget.js?22" data-telegram-login="${botU}" data-size="large" data-onauth="onTelegramAuth(user)" data-request-access="write"></script>`:'<p class="muted">⚠️ Bot kullanıcı adı alınamadı — widget yüklenemedi.</p>'}
-  <div style="margin-top:14px"><button class="ghost" onclick="location.reload()">${t('login_retry')}</button></div></div>`;
+  $('#view').innerHTML=`<section class="login-wrap"><div class="login-brand"><div><div class="login-mark">🛒 ${t('app_name')}</div><h1>${state.lang==='tr'?'İhtiyacın olan dijital ürünler, tek yerde.':'Digital essentials, all in one place.'}</h1><p>${state.lang==='tr'?'Güvenli alışveriş, hızlı teslimat ve botunla ortak bakiye.':'Secure checkout, fast delivery and one balance shared with your bot.'}</p></div><div class="login-mark">${state.lang==='tr'?'Hızlı · Güvenli · Kolay':'Fast · Secure · Simple'}</div></div><div class="login-panel"><h2>${t('login_h')}</h2><p class="muted">${t('login_p')}</p><div id="telegramLogin"></div><div id="loginUnavailable" class="login-error" style="display:none"></div><div style="margin-top:18px"><button class="ghost" id="loginRetry">${t('login_retry')}</button></div></div></section>`;
+  $('#loginRetry').onclick=()=>loadShell();
+  if(!botU){
+    $('#loginUnavailable').textContent=state.lang==='tr'?'Telegram giriş widget’ı için bot kullanıcı adı alınamadı. Sunucunun bot yapılandırmasını kontrol edin.':'Could not load the bot username for Telegram login. Check the bot configuration.';
+    $('#loginUnavailable').style.display='block';
+    return;
+  }
+  // Build the widget with DOM APIs. Never place a literal <script> inside an
+  // inline script template: HTML parsing would terminate this script early.
+  const widget=document.createElement('script');
+  widget.async=true;widget.src='https://telegram.org/js/telegram-widget.js?22';
+  widget.dataset.telegramLogin=botU;widget.dataset.size='large';
+  widget.dataset.onauth='onTelegramAuth(user)';widget.dataset.requestAccess='write';
+  $('#telegramLogin').appendChild(widget);
 }
 window.onTelegramAuth=async(user)=>{
   try{const r=await api('login',{method:'POST',body:JSON.stringify(user)});

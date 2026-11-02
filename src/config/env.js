@@ -2,6 +2,7 @@ require('dotenv').config();
 
 module.exports = {
   BOT_TOKEN: process.env.BOT_TOKEN,
+  BOT_USERNAME: String(process.env.BOT_USERNAME || '').replace(/^@/, ''),
   ADMIN_ID: parseInt(process.env.ADMIN_ID, 10),
   BINANCE_PAY_ID: process.env.BINANCE_PAY_ID || '123456789',
   BINANCE_API_KEY: process.env.BINANCE_API_KEY,

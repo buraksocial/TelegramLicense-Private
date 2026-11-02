@@ -31,7 +31,7 @@ const CS = require('../src/services/CheckoutService');
 const { t } = require('../src/utils/i18n');
 const { parseQuantity, parseMoney } = require('../src/utils/money');
 const { checkTransaction } = require('../src/services/binance');
-const { WEB_PORT, WEB_ENABLED, ADMIN_ID, BOT_TOKEN } = require('../src/config/env');
+const { WEB_PORT, WEB_ENABLED, ADMIN_ID, BOT_TOKEN, BOT_USERNAME } = require('../src/config/env');
 const { handleAdmin } = require('./admin');
 const DepSvc = require('../src/services/DepositProviders');
 
@@ -184,13 +184,16 @@ async function handleApi(req, res, url) {
         try { const j = JSON.parse(c.name_json); name = j.en || j.tr || c.slug; } catch (e) {}
         return { id: c.id, name, emoji: c.emoji };
       });
-    let botUsername = null;
+    let botUsername = BOT_USERNAME || null;
     try {
-      if (!startWebServer._me) {
+      if (!botUsername && !startWebServer._me) {
         const bot = global.__LICENSE_BOT;
-        if (bot && bot.telegram) startWebServer._me = bot.telegram.getMe().then((m) => m.username).catch(() => null);
+        if (bot && bot.telegram) startWebServer._me = bot.telegram.getMe().then((m) => m.username || null).catch(() => null);
       }
-      botUsername = await startWebServer._me || null;
+      if (!botUsername) {
+        botUsername = await startWebServer._me || null;
+        if (!botUsername) startWebServer._me = null; // allow a later retry after startup/network errors
+      }
     } catch (e) {}
     return json(res, 200, { languages: langs, categories: cats, currency: 'USD', bot_username: botUsername, crypto_deposits: DepSvc.providerConfigured() });
   }
