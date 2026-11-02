@@ -50,7 +50,7 @@ async function processPending(bot) {
     // history'ye düşmeyen kayıt EXPIRED + admin alert.
     const age = Date.now() - new Date(`${p.created_at}Z`).getTime();
     if (age > 1 * DAY) {
-      db.prepare("UPDATE pending_topups SET status='EXPIRED', note=COALESCE(note,'')||' ttl-7d', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(p.id);
+      db.prepare("UPDATE pending_topups SET status='EXPIRED', note=COALESCE(note,'')||' ttl-24h', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(p.id);
       const lang = getUserLang(p.user_id);
       await notify(bot, p.user_id, t(lang, 'payment_not_found') || 'Payment could not be verified.');
       await notify(bot, ADMIN_ID, t('en', 'topup_expired', { id: p.id, user: p.user_id, txid: p.txid }));
