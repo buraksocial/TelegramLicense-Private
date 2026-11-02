@@ -39,6 +39,7 @@ function setupUserHandlers(bot) {
       reply_markup: {
         inline_keyboard: [
           [{ text: t(lang, 'btn_products') || '🛒 Products', callback_data: 'menu_products' }],
+          [{ text: '⭐ Favori Servislerim', callback_data: 'menu_favorites' }],
           [
             { text: t(lang, 'btn_profile') || '👤 Profile', callback_data: 'menu_profile' },
             { text: t(lang, 'btn_wallet') || '💼 Wallet', callback_data: 'menu_wallet' }
@@ -54,6 +55,26 @@ function setupUserHandlers(bot) {
         ]
       }
     }).catch(e => { });
+  });
+
+  bot.action('menu_favorites', async (ctx) => {
+    const lang = getUserLang(ctx.from.id);
+    const rows = db.prepare(`SELECT f.product_supplier_id ps_id, p.id product_id, p.name product_name,
+      s.name supplier_name, ps.remote_service_id, ps.enabled
+      FROM user_favorite_services f
+      JOIN product_suppliers ps ON ps.id=f.product_supplier_id
+      JOIN products p ON p.id=ps.product_id
+      JOIN suppliers s ON s.id=ps.supplier_id
+      WHERE f.user_id=? AND p.is_active=1 AND ps.enabled=1 ORDER BY f.created_at DESC`).all(ctx.from.id);
+    const buttons = rows.map((r) => {
+      let name = getProductName({ name: r.product_name }, lang);
+      return [{ text: `⭐ ${name.slice(0, 28)} · ${r.supplier_name.slice(0, 16)}`, callback_data: `svc_${r.product_id}_${r.ps_id}` }];
+    });
+    if (!buttons.length) buttons.push([{ text: 'Henüz favori servis yok', callback_data: 'menu_products' }]);
+    buttons.push([{ text: t(lang, 'btn_main_menu'), callback_data: 'main_menu' }]);
+    return ctx.editMessageText('⭐ <b>Favori Servislerim</b>\n\nKaydettiğiniz tedarikçi servisleri:', {
+      parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons }
+    }).catch(() => {});
   });
 
   bot.action('menu_profile', async (ctx) => {
@@ -649,6 +670,9 @@ function setupUserHandlers(bot) {
       if (o.affordable) {
         serviceButtons.push([{ text: `#${i + 1} — ${price}$ · ${svcName}${wTag}`, callback_data: `svc_${productId}_${o.product_supplier_id}` }]);
       }
+      const favorite = !!db.prepare('SELECT 1 FROM user_favorite_services WHERE user_id=? AND product_supplier_id=?')
+        .get(ctx.from.id, o.product_supplier_id);
+      serviceButtons.push([{ text: favorite ? '★ Favoriden çıkar' : '☆ Favoriye ekle', callback_data: `favtoggle_${productId}_${o.product_supplier_id}` }]);
     });
 
     const headline = decision.soldOut
@@ -673,6 +697,25 @@ function setupUserHandlers(bot) {
     return ctx.editMessageText(headline, {
       parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard }
     }).catch(() => {});
+  });
+
+  bot.action(/^favtoggle_(\d+)_(\d+)$/, async (ctx) => {
+    const productId = Number(ctx.match[1]);
+    const psId = Number(ctx.match[2]);
+    const exists = db.prepare('SELECT 1 FROM user_favorite_services WHERE user_id=? AND product_supplier_id=?').get(ctx.from.id, psId);
+    if (exists) {
+      db.prepare('DELETE FROM user_favorite_services WHERE user_id=? AND product_supplier_id=?').run(ctx.from.id, psId);
+      await ctx.answerCbQuery('Favorilerden çıkarıldı');
+    } else {
+      const valid = db.prepare(`SELECT 1 FROM product_suppliers ps JOIN products p ON p.id=ps.product_id
+        WHERE ps.id=? AND ps.product_id=? AND p.is_active=1`).get(psId, productId);
+      if (valid) {
+        db.prepare('INSERT OR IGNORE INTO user_favorite_services (user_id,product_supplier_id) VALUES (?,?)').run(ctx.from.id, psId);
+        await ctx.answerCbQuery('Favorilere eklendi ⭐');
+      }
+    }
+    return bot.telegram.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id,
+      undefined, ctx.callbackQuery.message.text, ctx.callbackQuery.message.reply_markup).catch(() => {});
   });
 
   bot.action(/^catback_(\d+)$/, async (ctx) => {

@@ -35,7 +35,7 @@ function categoryFor(name, raw) {
   const cats = db.prepare('SELECT * FROM categories WHERE is_active=1 ORDER BY sort_order,id').all();
   const ai = cats.find((c) => c.slug === 'ai');
   const brand = [
-    ['ai-gemini', /gemini/], ['ai-chatgpt', /chatgpt|gpt\b/],
+    ['ai-gemini', /gemini|google\s+veo|\bveo\b/], ['ai-chatgpt', /chatgpt|gpt\b/],
     ['ai-deepseek', /deepseek/], ['ai-claude', /claude/]
   ].find(([, re]) => re.test(text));
   if (brand) {
@@ -71,7 +71,8 @@ function findOwner(service) {
 
 // Supplier wording can vary, but these three fields define a sellable SKU.
 function catalogKey(value) {
-  const text = String(value || '').toLowerCase().replace(/[^a-z0-9çğıöşüı]+/g, ' ');
+  const text = String(value || '').toLowerCase().replace(/google\s+veo|\bveo\b/g, 'gemini')
+    .replace(/[^a-z0-9çğıöşüı]+/g, ' ');
   const brands = ['gemini', 'chatgpt', 'deepseek', 'claude', 'spotify', 'apple music', 'netflix', 'adobe', 'duolingo'];
   const found = brands.filter((b) => text.includes(b));
   const brand = found.length ? found.join('+') : '';

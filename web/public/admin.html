@@ -35,6 +35,21 @@ code{background:#0d1017;border:1px solid var(--line);padding:2px 6px;border-radi
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#1d222b;border:1px solid var(--line);padding:10px 16px;border-radius:10px;display:none;z-index:50}
 a{color:var(--acc)}
 </style>
+<style>
+/* Modern admin workspace layer over the existing screens and API. */
+:root{--bg:#080d18;--panel:#101827;--line:#ffffff14;--acc:#7c8cff}
+body{background:radial-gradient(900px 480px at 5% -10%,#253d73 0,transparent 62%),radial-gradient(700px 400px at 100% 0,#183d4a 0,transparent 58%),var(--bg);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:14px clamp(16px,3vw,36px);background:#0e1727d9;backdrop-filter:blur(18px);border-bottom:1px solid #ffffff18;box-shadow:0 12px 35px #0004}
+header .logo{font-size:16px;letter-spacing:-.03em}.logo:after{content:'  •  Control Center';font-size:11px;color:#8f9db5;font-weight:500}
+nav{gap:7px}nav button{border-color:#ffffff16;background:#ffffff06;color:#aebbd0;padding:8px 12px;border-radius:10px;transition:.18s}
+nav button:hover,nav button.on{background:linear-gradient(135deg,#7c8cff,#5967df);border-color:transparent;color:white;box-shadow:0 7px 20px #5b6be655}
+main{max-width:1440px;padding:28px clamp(16px,3vw,40px) 70px}.card{background:linear-gradient(145deg,#142137e8,#0f1828e8);border:1px solid #ffffff14;border-radius:18px;padding:18px;box-shadow:0 16px 45px #0002}
+.grid{gap:14px}.stat.card{background:linear-gradient(145deg,#182844,#111d31);border-color:#ffffff12}.stat b{font-size:25px;letter-spacing:-.04em}.stat span{font-size:12px;color:#9eacc1}
+table{border-spacing:0;border-collapse:separate;overflow:hidden;border:1px solid #ffffff10;border-radius:13px}th,td{border-bottom:1px solid #ffffff0d;padding:11px 12px}th{background:#ffffff08;text-transform:uppercase;letter-spacing:.06em;font-size:10px}tr:last-child td{border-bottom:0}tr:hover td{background:#ffffff08}
+input,select{background:#091221;border-color:#ffffff18;padding:10px 12px;border-radius:10px}button.btn{background:linear-gradient(135deg,#7c8cff,#5967df);box-shadow:0 7px 18px #5967df33}button.gh{background:#ffffff08;border-color:#ffffff18}
+.pill{background:#ffffff08}.modal{background:#020611cc;backdrop-filter:blur(8px)}.sheet{background:linear-gradient(145deg,#17263e,#0d1727);border-color:#ffffff1a;box-shadow:0 25px 80px #0008}#toast{background:#17263d;border-color:#ffffff20;box-shadow:0 12px 35px #0007}
+@media(max-width:760px){header{align-items:flex-start}header .logo{width:100%}header .logo:after{display:none}nav{overflow:auto;max-width:100%;padding-bottom:2px}main{padding-top:18px}.card{padding:13px;overflow:auto}table{min-width:720px}}
+</style>
 </head>
 <body>
 <header>
