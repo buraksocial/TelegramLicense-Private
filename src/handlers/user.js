@@ -445,26 +445,40 @@ function setupUserHandlers(bot) {
     return CS.readPriceLock(token);
   }
 
+  // A category may contain products several levels below it, e.g.
+  // Yapay Zeka -> Gemini -> Pro -> 3 Aylık. Always query the whole subtree.
+  function productsInCategory(categoryId) {
+    return db.prepare(`WITH RECURSIVE tree(id) AS (
+      SELECT ? UNION ALL SELECT c.id FROM categories c JOIN tree t ON c.parent_id=t.id
+    )
+    SELECT DISTINCT p.* FROM products p
+      JOIN product_categories pc ON pc.product_id=p.id
+      JOIN tree t ON t.id=pc.category_id
+    WHERE p.is_active=1 ORDER BY p.id`).all(categoryId);
+  }
+
+  function categoryProductCount(categoryId) {
+    return db.prepare(`WITH RECURSIVE tree(id) AS (
+      SELECT ? UNION ALL SELECT c.id FROM categories c JOIN tree t ON c.parent_id=t.id
+    )
+    SELECT COUNT(DISTINCT p.id) c FROM products p
+      JOIN product_categories pc ON pc.product_id=p.id
+      JOIN tree t ON t.id=pc.category_id
+    WHERE p.is_active=1`).get(categoryId).c;
+  }
+
   // Step 1: categories (falls back to a flat product list when none defined)
   bot.action('menu_products', async (ctx) => {
     const lang = getUserLang(ctx.from.id);
     const cats = db.prepare('SELECT * FROM categories WHERE is_active = 1 AND parent_id IS NULL ORDER BY sort_order, id').all()
-      .filter((c) => db.prepare(`SELECT COUNT(DISTINCT p.id) c FROM products p
-        JOIN product_categories pc ON pc.product_id=p.id
-        LEFT JOIN categories child ON child.id=pc.category_id
-        WHERE (pc.category_id=? OR child.parent_id=?) AND p.is_active=1`).get(c.id, c.id).c > 0);
+      .filter((c) => categoryProductCount(c.id) > 0);
 
     if (cats.length === 0) return showProductsForCategory(ctx, lang, 0);
 
     const rows = [];
     for (let i = 0; i < cats.length; i += 2) {
       const row = cats.slice(i, i + 2).map((c) => {
-        const count = db.prepare(
-          `SELECT COUNT(DISTINCT p.id) c FROM products p
-           JOIN product_categories pc ON pc.product_id = p.id
-           LEFT JOIN categories child ON child.id = pc.category_id
-           WHERE (pc.category_id = ? OR child.parent_id = ?) AND p.is_active = 1`
-        ).get(c.id, c.id).c;
+        const count = categoryProductCount(c.id);
         return { text: `${c.emoji || '📂'} ${categoryName(c, lang)} (${count})`, callback_data: `cat_${c.id}` };
       });
       rows.push(row);
@@ -492,10 +506,8 @@ function setupUserHandlers(bot) {
     const current = catId > 0 ? db.prepare('SELECT * FROM categories WHERE id = ? AND is_active = 1').get(catId) : null;
     const children = current ? db.prepare('SELECT * FROM categories WHERE parent_id = ? AND is_active = 1 ORDER BY sort_order,id').all(catId) : [];
     if (children.length && page === 1) {
-      const rows = children.filter((child) => db.prepare(`SELECT COUNT(*) c FROM products p JOIN product_categories pc ON pc.product_id=p.id
-        WHERE pc.category_id=? AND p.is_active=1`).get(child.id).c > 0).map((child) => {
-        const count = db.prepare(`SELECT COUNT(*) c FROM products p JOIN product_categories pc ON pc.product_id=p.id
-          WHERE pc.category_id=? AND p.is_active=1`).get(child.id).c;
+      const rows = children.filter((child) => categoryProductCount(child.id) > 0).map((child) => {
+        const count = categoryProductCount(child.id);
         return [{ text: `${child.emoji || '📂'} ${categoryName(child, lang)} (${count})`, callback_data: `cat_${child.id}` }];
       });
       rows.push([{ text: t(lang, 'btn_all_products') || '📋 Tümü', callback_data: `cat_${catId}_2` }]);
@@ -507,10 +519,7 @@ function setupUserHandlers(bot) {
 
     let products;
     if (catId > 0) {
-      products = db.prepare(
-        `SELECT p.* FROM products p JOIN product_categories pc ON pc.product_id = p.id
-         WHERE p.is_active = 1 AND pc.category_id = ? ORDER BY p.id`
-      ).all(catId);
+      products = productsInCategory(catId);
     } else {
       products = db.prepare('SELECT * FROM products WHERE is_active = 1 ORDER BY id').all();
     }

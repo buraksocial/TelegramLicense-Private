@@ -192,7 +192,11 @@ class PricingEngine {
 
     let priceOffer = null;
     if (affordable.length || reservable.length) {
-      const candidates = affordable.length ? affordable : reservable;
+      // Price from every in-stock offer, even when one supplier currently has
+      // no balance. Fulfilment still uses `affordable` only. This prevents a
+      // temporary supplier balance problem from selecting an unusually costly
+      // supplier and inflating the customer price.
+      const candidates = reservable.length ? reservable : affordable;
       if (mode === 'manual') priceOffer = null;
       else if (mode === 'cheapest') {
         priceOffer = [...candidates].sort((a, b) => a.sellUnit - b.sellUnit || b.marginPct - a.marginPct)[0];

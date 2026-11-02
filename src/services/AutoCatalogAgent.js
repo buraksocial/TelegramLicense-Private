@@ -38,7 +38,11 @@ function categoryFor(name, raw) {
     ['ai-gemini', /gemini/], ['ai-chatgpt', /chatgpt|gpt\b/],
     ['ai-deepseek', /deepseek/], ['ai-claude', /claude/]
   ].find(([, re]) => re.test(text));
-  if (brand) return cats.find((c) => c.slug === brand[0]) || ai || null;
+  if (brand) {
+    const family = cats.find((c) => c.slug === brand[0]) || ai;
+    const tier = (text.match(/\b(pro|plus|ultra|basic|premium|team|business|student|enterprise)\b/) || [null, null])[1];
+    return (family && tier && cats.find((c) => c.slug === `${brand[0]}-${tier}`)) || family || null;
+  }
   const rules = {
     ai: /gemini|chatgpt|claude|\bai\b|yapay zek/,
     streaming: /netflix|spotify|disney|youtube|prime video|canva/,
@@ -54,13 +58,28 @@ function categoryFor(name, raw) {
 
 function findOwner(service) {
   const products = db.prepare('SELECT * FROM products WHERE is_active=1').all();
+  const key = catalogKey(service.name || '');
   let owner = null; let score = 0;
   for (const p of products) {
     if (p.warranty && p.warranty !== 'none' && !warrantyAllows(p.warranty, service.warranty || 'unknown')) continue;
+    if (key && catalogKey(productName(p)) !== key) continue;
     const s = CatalogMatcher.scoreMatch(service.name || '', productName(p));
     if (s > score) { score = s; owner = p; }
   }
   return score >= 0.72 ? owner : null;
+}
+
+// Supplier wording can vary, but these three fields define a sellable SKU.
+function catalogKey(value) {
+  const text = String(value || '').toLowerCase().replace(/[^a-z0-9çğıöşüı]+/g, ' ');
+  const brands = ['gemini', 'chatgpt', 'deepseek', 'claude', 'spotify', 'apple music', 'netflix', 'adobe', 'duolingo'];
+  const found = brands.filter((b) => text.includes(b));
+  const brand = found.length ? found.join('+') : '';
+  const tier = (text.match(/\b(pro|plus|ultra|basic|premium|team|business|student|enterprise)\b/) || ['base', 'base'])[1];
+  const duration = text.match(/\b(\d{1,3})\s*(m|mo|month|months|ay|aylık)\b/);
+  const months = duration ? duration[1] : 'unspecified';
+  if (brand) return `${brand}|${tier}|${months}`;
+  return text.split(/\s+/).filter((w) => w.length > 2 && !['auto', 'imported', 'link', 'links', 'card', 'required'].includes(w)).slice(0, 6).join('|');
 }
 
 async function productCopy(supplier, service) {
@@ -70,7 +89,7 @@ async function productCopy(supplier, service) {
   const sourceDesc = cleanText(service.description);
   let copies = {};
   try {
-    copies = await TranslationService.generateProductCopy(sourceName, sourceDesc, baseLangs, 'Do not reveal suppliers, bots, API URLs, contact links or internal sources.');
+    copies = await TranslationService.TranslationService.generateProductCopy(sourceName, sourceDesc, baseLangs, 'Do not reveal suppliers, bots, API URLs, contact links or internal sources.');
   } catch (e) { console.error('[AutoCatalogAgent] copy generation:', e.message); }
   const names = {}; const descs = {};
   for (const lang of baseLangs) {
@@ -94,7 +113,7 @@ async function createProduct(supplier, service) {
     default_floor_price, supplier_selection_mode, is_active, hidden_when_unaffordable, auto_copy_done)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     JSON.stringify(names), JSON.stringify(descs), Math.round(sell * 100) / 100, cost,
-    'max_profit', service.warranty || 'none', margin, floor, 'cheapest', 1, 0, 1
+    'cheapest', service.warranty || 'none', margin, floor, 'cheapest', 1, 0, 1
   );
   const id = info.lastInsertRowid;
   if (category) db.prepare('INSERT OR IGNORE INTO product_categories (product_id, category_id) VALUES (?,?)').run(id, category.id);
@@ -134,6 +153,29 @@ async function repairExisting(supplier, services) {
   return repaired;
 }
 
+async function splitWrongLinks(supplier, services) {
+  const links = db.prepare(`SELECT ps.*, p.name product_name FROM product_suppliers ps
+    JOIN products p ON p.id=ps.product_id WHERE ps.supplier_id=? AND ps.note='auto-import'`).all(supplier.id);
+  let moved = 0;
+  for (const linkRow of links) {
+    const service = (services || []).find((s) => String(s.remote_service_id) === String(linkRow.remote_service_id));
+    if (!service) continue;
+    const sourceKey = catalogKey(productName({ name: linkRow.product_name }));
+    const serviceKey = catalogKey(service.name);
+    if (!serviceKey || sourceKey === serviceKey) continue;
+    let target = db.prepare('SELECT * FROM products WHERE is_active=1').all()
+      .find((p) => catalogKey(productName(p)) === serviceKey);
+    if (!target) target = await createProduct(supplier, service);
+    if (target.id !== linkRow.product_id) {
+      db.prepare('UPDATE product_suppliers SET product_id=? WHERE id=?').run(target.id, linkRow.id);
+      const category = categoryFor(service.name, service.category_raw);
+      if (category) db.prepare('INSERT OR IGNORE INTO product_categories (product_id,category_id) VALUES (?,?)').run(target.id, category.id);
+      moved++;
+    }
+  }
+  return moved;
+}
+
 async function syncSupplier(supplier, services) {
   let created = 0; let linked = 0;
   for (const service of services || []) {
@@ -143,8 +185,9 @@ async function syncSupplier(supplier, services) {
       if (link(product, supplier, service)) linked++;
   }
   const repaired = await repairExisting(supplier, services);
-  if (created || linked || repaired) console.log(`[AutoCatalogAgent] ${supplier.name}: ${created} ürün, ${linked} bağlantı, ${repaired} onarım`);
-  return { created, linked, repaired };
+  const moved = await splitWrongLinks(supplier, services);
+  if (created || linked || repaired || moved) console.log(`[AutoCatalogAgent] ${supplier.name}: ${created} ürün, ${linked} bağlantı, ${repaired} onarım, ${moved} ayrıştırma`);
+  return { created, linked, repaired, moved };
 }
 
 module.exports = { syncSupplier };
