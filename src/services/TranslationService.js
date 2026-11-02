@@ -263,7 +263,8 @@ class TranslationService {
             'Output JSON: {"name": "...", "description": "..."} where name is a short clean product title ' +
             '(keep brand names, add plan length like 12 Ay / 3 Ay) and description is 3-5 bullet lines with ' +
             'emojis (✅) covering what the buyer gets, delivery type and a short note. ' +
-            'Never mention prices, suppliers or warranty hours unless present in the source. No markdown.' +
+           'Never mention suppliers, supplier bots, API endpoints, API URLs, contact links or internal sources. ' +
+           'Remove any supplier link from the output. Never mention prices or warranty hours unless present in the source. No markdown.' +
             (extra ? ' Context: ' + extra : '')
         },
         { role: 'user', content: JSON.stringify({ source_name: sourceName, source_desc: sourceDesc || '' }) }

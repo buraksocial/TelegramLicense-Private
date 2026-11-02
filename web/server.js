@@ -390,14 +390,7 @@ async function handleApi(req, res, url) {
     try {
       if (pay === 'balance') {
         const bal = round2(user.balance || 0);
-        if (bal < total && !body.reserve) return json(res, 402, { error: `bakiye yetersiz (bakiye: ${bal}$, gereken: ${total}$). Rezervasyon seçebilir veya @MerhabaWorld ile görüşebilirsiniz.` });
-        if (bal < total && body.reserve) {
-          result = await CS.fulfill(userId, product, qty, {
-            paidAmount: total, unitBase, chosenPs: lock ? lock.psId : null, txid,
-            isReservation: true, unpaidReservation: true, source: 'web'
-          });
-          return json(res, 200, result);
-        }
+        if (bal < total) return json(res, 402, { error: `bakiye yetersiz (bakiye: ${bal}$, gereken: ${total}$). Rezervasyon için önce bakiye yükleyin.` });
         db.prepare('UPDATE users SET balance = balance - ? WHERE id = ?').run(total, userId);
         try {
           result = await CS.fulfill(userId, product, qty, {

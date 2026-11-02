@@ -170,7 +170,7 @@ async function openProduct(id){
 }
 
 async function openCheckout(sel, forceReserve=false){
-  const d=state.product;const s=d.summary;const canReserve=true;
+   const d=state.product;const s=d.summary;
   let unit=s.price,lock=null;
    if(sel){ // dynamic service chosen -> lock it
     try{const r=await api('lock',{method:'POST',body:JSON.stringify({product_id:d.product.id,ps_id:sel.ps_id||undefined,best:!!sel.best})});
@@ -183,15 +183,15 @@ async function openCheckout(sel, forceReserve=false){
   <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
     ${[1,5,10,20,50,100].map(q=>`<button class="ghost qb" data-q="${q}" style="padding:8px 12px">${q}</button>`).join('')}</div>
   <div class="rowbtns" style="margin-top:14px">
-     ${(s.sold_out||forceReserve||canReserve)?`<label style="display:flex;align-items:center;gap:8px;width:100%;font-size:14px"><input type="checkbox" id="bBuyReserveOn" style="width:auto" checked> ${t('reserve')}</label>`:''}
-     <button id="payBal" ${!forceReserve&&state.me&&state.me.balance<unit?'disabled':''}>${t('pay_bal')} (${money(state.me?state.me.balance:0)})</button>
+     <label style="display:flex;align-items:center;gap:8px;width:100%;font-size:14px"><input type="checkbox" id="bBuyReserveOn" style="width:auto"> ${t('reserve')}</label>
+     <button id="payBal" ${state.me&&state.me.balance<unit?'disabled':''}>${t('pay_bal')} (${money(state.me?state.me.balance:0)})</button>
     <button class="ghost" id="payBn">${t('pay_bn')}</button>
     <button class="ghost" id="cancel">❌</button>
   </div>${state.me&&state.me.balance<0?`<p style="color:#e5484d;font-size:13px;margin:6px 0 0">⚠️ ${t('caride_note')}</p>`:''}<div id="bnBox" style="display:none"><label>TXID</label><input id="inTx" placeholder="işlem hash/id"><button id="bnGo" style="margin-top:8px">${t('pay')}</button></div>`;
   $('#modal').classList.add('on');
   const qtyEl=$('#inQty');
    const upd=()=>{$('#tt').textContent=money(Number(qtyEl.value||1)*unit);
-     $('#payBal').disabled=!(forceReserve||canReserve)&&state.me.balance<Number(qtyEl.value||1)*unit};
+     $('#payBal').disabled=state.me.balance<Number(qtyEl.value||1)*unit};
   qtyEl.oninput=upd;document.querySelectorAll('.qb').forEach(b=>b.onclick=()=>{qtyEl.value=b.dataset.q;upd()});upd();
   $('#cancel').onclick=closeModal;
   const pay=async(pmethod,extra)=>{
