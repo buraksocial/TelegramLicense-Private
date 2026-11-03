@@ -167,7 +167,8 @@ class TranslationService {
     }
 
     // 2. Local products (name JSON changes)
-    const products = db.prepare('SELECT id, name FROM products').all();
+    const products = db.prepare('SELECT id, name, description FROM products').all();
+    const langs = enabledLangs().filter((l) => l !== 'en');
     const en = (() => {
       const out = [];
       for (const p of products) {
@@ -175,18 +176,22 @@ class TranslationService {
         try { parsed = JSON.parse(p.name); } catch (e) {}
         const enName = parsed ? parsed.en : p.name;
         if (!enName) continue;
-        const h = hashText(enName);
-        const done = db
-          .prepare('SELECT 1 FROM translations WHERE content_hash = ? AND status = \'done\' LIMIT 1')
-          .get(h);
-        if (!done && !parsed) TranslationService.enqueue('product', p.id, 'name', enName, 'name_change');
+        if (!parsed) TranslationService.enqueue('product', p.id, 'name', enName, 'name_change');
         out.push({ id: p.id, enName, parsed });
+        let parsedDesc = null;
+        try { parsedDesc = JSON.parse(p.description || '{}'); } catch (e) {}
+        const enDesc = parsedDesc ? parsedDesc.en : p.description;
+        if (enDesc) {
+          for (const lang of langs) {
+            if (parsedDesc && parsedDesc[lang]) continue;
+            TranslationService.enqueue('product', p.id, 'description', enDesc, 'new');
+          }
+        }
       }
       return out;
     })();
 
     // 3. Products missing translations for an enabled language -> queue + mark
-    const langs = enabledLangs().filter((l) => l !== 'en');
     for (const { id, enName, parsed } of en) {
       for (const lang of langs) {
         if (parsed && parsed[lang]) continue; // already has localized text
@@ -285,23 +290,27 @@ class TranslationService {
   }
 
   static applyToProducts() {
-    const products = db.prepare('SELECT id, name FROM products').all();
-    const upd = db.prepare('UPDATE products SET name = ? WHERE id = ?');
+    const products = db.prepare('SELECT id, name, description FROM products').all();
+    const upd = db.prepare('UPDATE products SET name = ?, description = ? WHERE id = ?');
     for (const p of products) {
-      let parsed;
-      try { parsed = JSON.parse(p.name); } catch (e) { continue; }
+      let parsed; let parsedDesc;
+      try { parsed = JSON.parse(p.name); } catch (e) { parsed = { en: p.name }; }
+      try { parsedDesc = JSON.parse(p.description || '{}'); } catch (e) { parsedDesc = {}; }
       const enName = parsed.en;
-      if (!enName) continue;
+      const enDesc = parsedDesc.en;
       let changed = false;
       for (const lang of enabledLangs()) {
-        if (lang === 'en' || parsed[lang]) continue;
-        const tr = TranslationService.translate(enName, lang);
-        if (tr && tr !== enName) {
-          parsed[lang] = tr;
-          changed = true;
+        if (lang === 'en') continue;
+        if (enName && !parsed[lang]) {
+          const tr = TranslationService.translate(enName, lang);
+          if (tr && tr !== enName) { parsed[lang] = tr; changed = true; }
+        }
+        if (enDesc && !parsedDesc[lang]) {
+          const tr = TranslationService.translate(enDesc, lang, { field: 'description' });
+          if (tr && tr !== enDesc) { parsedDesc[lang] = tr; changed = true; }
         }
       }
-      if (changed) upd.run(JSON.stringify(parsed), p.id);
+      if (changed) upd.run(JSON.stringify(parsed), JSON.stringify(parsedDesc), p.id);
     }
   }
 
